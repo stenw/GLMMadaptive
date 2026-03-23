@@ -119,3 +119,10 @@ class TestLogDmvnorm:
         val1 = log_dmvnorm(x, cov=cov)
         val2 = log_dmvnorm(x, cov_inv=cov_inv, log_det_cov=log_det)
         assert_allclose(val1, val2, atol=1e-12)
+
+    def test_vector_input_returns_scalar(self):
+        """A single observation should return a scalar float."""
+        cov = np.eye(2)
+        x = np.array([0.1, -0.2])
+        val = log_dmvnorm(x, cov=cov)
+        assert np.isscalar(val)
