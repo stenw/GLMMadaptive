@@ -127,17 +127,26 @@ def r_env():
     return ro
 
 
+def _df_to_r(data: pd.DataFrame):
+    """Convert a pandas DataFrame to an R data.frame (rpy2 3.x API)."""
+    import rpy2.robjects as ro
+    from rpy2.robjects import default_converter
+    from rpy2.robjects.conversion import localconverter
+    from rpy2.robjects import pandas2ri
+
+    with localconverter(default_converter + pandas2ri.converter):
+        return ro.conversion.py2rpy(data)
+
+
 def r_fit_binary(r_env, data: pd.DataFrame) -> dict:
     """
     Fit the binary random-intercept model in R and return numeric results.
 
     Returns dict with keys: betas, D, logLik, bse.
     """
-    ro = r_env
     import rpy2.robjects as ro_mod
-    from rpy2.robjects import pandas2ri
-    pandas2ri.activate()
-    r_data = pandas2ri.py2rpy(data)
+
+    r_data = _df_to_r(data)
     ro_mod.globalenv["py_data"] = r_data
     ro_mod.r("""
         library(GLMMadaptive)
@@ -150,7 +159,7 @@ def r_fit_binary(r_env, data: pd.DataFrame) -> dict:
         r_betas   <- as.numeric(fixef(fm))
         r_D       <- as.numeric(fm$D)
         r_loglik  <- as.numeric(logLik(fm))
-        r_bse     <- sqrt(diag(vcov(fm)))
+        r_bse     <- sqrt(diag(vcov(fm, parm = "fixed-effects")))
     """)
     return {
         "betas": np.array(ro_mod.r("r_betas")),

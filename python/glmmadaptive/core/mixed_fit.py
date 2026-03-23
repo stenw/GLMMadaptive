@@ -139,26 +139,29 @@ def _update_betas(betas, D, phis, family, X_list, Z_list, y_list, gh,
 
 def _update_phis(betas, D, phis, family, X_list, Z_list, y_list, gh,
                  max_phis: float):
-    """One Newton-Raphson step for phis."""
+    """
+    Update phis via bounded L-BFGS-B optimisation (a few steps).
+
+    A raw Newton step is unreliable for dispersion parameters because the
+    marginal likelihood is often flat in that direction — the Hessian is tiny
+    and the Newton step overshoots badly.  L-BFGS-B with bounds is robust
+    and avoids the need for a line search.
+    """
     if phis is None or len(phis) == 0:
         return phis
 
+    log_max = np.log(max_phis)
+
     def neg_ll_phis(ph):
+        ph = np.asarray(ph)
         return -loglik_mixed(betas, D, ph, family, X_list, Z_list, y_list, gh)
 
-    from glmmadaptive.utils.numdiff import fd_hess as _fd_hess, fd_grad as _fd_grad
-    grad = _fd_grad(neg_ll_phis, phis)
-    H = _fd_hess(neg_ll_phis, phis)
-    H = nearPD(H)
-
-    try:
-        delta = np.linalg.solve(H, grad)
-    except np.linalg.LinAlgError:
-        delta = grad
-
-    phis_new = phis - delta
-    phis_new = np.clip(phis_new, -np.log(max_phis), np.log(max_phis))
-    return phis_new
+    bounds = [(-log_max, log_max)] * len(phis)
+    result = minimize(
+        neg_ll_phis, phis, method="L-BFGS-B", bounds=bounds,
+        options={"maxiter": 10, "ftol": 1e-9, "gtol": 1e-6},
+    )
+    return result.x
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +258,7 @@ def mixed_fit(
         delta_params = np.max(np.abs(betas_new - betas))
         if phis is not None and phis_new is not None:
             delta_params = max(delta_params, np.max(np.abs(phis_new - phis)))
-        delta_ll = abs(ll - ll_prev) / (abs(ll_prev) + ctrl["tol3"])
+        delta_ll = abs(ll - ll_prev) / (abs(ll_prev) + 1.0 + ctrl["tol3"])
 
         if verbose:
             print(f"EM iter {em_iter+1}: logLik={ll:.6f}  Δparam={delta_params:.2e}")
@@ -307,7 +310,7 @@ def mixed_fit(
             D = nearPD(D)
 
             ll = -result.fun
-            delta_ll = abs(ll - ll_prev) / (abs(ll_prev) + ctrl["tol3"])
+            delta_ll = abs(ll - ll_prev) / (abs(ll_prev) + 1.0 + ctrl["tol3"])
             ll_prev = ll
             iter_qn += ctrl["iter_qn_incr"]
 
