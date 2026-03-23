@@ -1,6 +1,33 @@
+# mixed_model
+# Main user-facing function for fitting generalized linear mixed models with adaptive
+# Gauss-Hermite quadrature. This is the entry point documented in man/mixed_model.Rd.
+#
+# Responsibilities (in order):
+#   1. Family validation: reject gaussian; handle MASS namespace collision for NB;
+#      enforce zi_fixed is provided for zero-inflated/hurdle families.
+#   2. Data preparation: convert tibbles to data.frames; ensure grouping variable is a
+#      factor (sorted in original order); sort rows by group; drop unused factor levels.
+#   3. Model frame construction: build mfX (fixed effects), mfZ (random effects),
+#      mfX_zi and mfZ_zi (zero-part); handle missing data via na.action.
+#   4. ID and offset extraction: convert the grouping variable to a consecutive integer
+#      index; validate weights.
+#   5. Design matrix construction: X (fixed effects), Z (random effects via constructor_Z),
+#      X_zi and Z_zi (zero-part); extract offset vectors.
+#   6. Control parameter setup: merge user-supplied control arguments with defaults.
+#   7. Initial value computation: use GLM coefficients as starting betas (scaled by
+#      sqrt(1.346) to account for the random effects variance), D = I_nRE;
+#      for ZI families, also fit a logistic GLM for gammas.
+#   8. Penalization setup: convert penalized argument to a standardized list format.
+#   9. Family function assembly: build the Funs list (log_dens, mu_fun, var_fun, etc.);
+#      auto-detect whether phis are needed by calling log_dens with phis=NULL and
+#      checking for an error.
+#  10. Model fitting: call mixed_fit() and post-process results (assign names, attach
+#      data/terms/model frames/control/family/call); check Hessian positive-definiteness.
+#
+# See man/mixed_model.Rd for the full parameter and return value documentation.
 mixed_model <- function (fixed, random, data, family, weights = NULL,
-                         na.action = na.exclude, zi_fixed = NULL, zi_random = NULL, 
-                         penalized = FALSE, n_phis = NULL, initial_values = NULL, 
+                         na.action = na.exclude, zi_fixed = NULL, zi_random = NULL,
+                         penalized = FALSE, n_phis = NULL, initial_values = NULL,
                          control = list(), ...) {
     call <- match.call()
     # set family

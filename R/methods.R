@@ -1,3 +1,15 @@
+# print.MixMod
+# Prints a brief summary of a fitted MixMod object. Displays the model call, family,
+# link function, random-effects covariance matrix (as standard deviations and correlations
+# if non-diagonal), fixed-effects coefficient estimates, zero-part coefficients (if present),
+# dispersion parameters (if present), and the log-likelihood.
+#
+# Arguments:
+#   x:      a fitted object of class "MixMod"
+#   digits: number of significant digits for display (default: max(4, getOption("digits")-4))
+#   ...:    currently ignored
+#
+# Returns: x invisibly (for method chaining).
 print.MixMod <- function (x, digits = max(4, getOption("digits") - 4), ...) {
     cat("\nCall:\n", printCall(x$call), "\n\n", sep = "")
     cat("\nModel:")
@@ -49,7 +61,28 @@ print.MixMod <- function (x, digits = max(4, getOption("digits") - 4), ...) {
     invisible(x)
 }
 
-vcov.MixMod <- function (object, parm = c("all", "fixed-effects", "var-cov","extra", 
+# vcov.MixMod
+# Computes the variance-covariance matrix of the parameter estimates. By default, returns
+# the inverse of the Hessian (observed information matrix). If sandwich = TRUE, returns
+# the sandwich (robust) estimator V = H^{-1} * (sum_i s_i s_i') * H^{-1}, which is
+# consistent under model misspecification.
+#
+# The parm argument controls which subset of parameters to return:
+#   "all":          full p x p variance-covariance matrix
+#   "fixed-effects": variance-covariance for betas only
+#   "var-cov":       variance-covariance for the covariance matrix parameters (D elements)
+#   "extra":         variance-covariance for phis (dispersion parameters)
+#   "zero_part":     variance-covariance for gammas (zero-part fixed effects)
+#
+# Arguments:
+#   object:   a fitted MixMod object
+#   parm:     which parameters to extract (see above)
+#   sandwich: logical; if TRUE returns the sandwich variance estimator (default: FALSE)
+#   ...:      currently ignored
+#
+# Returns:
+#   A numeric matrix of the requested variance-covariance submatrix.
+vcov.MixMod <- function (object, parm = c("all", "fixed-effects", "var-cov","extra",
                                           "zero_part"), sandwich = FALSE, ...) {
     parm <- match.arg(parm)
     V <- solve(object$Hessian)
@@ -101,6 +134,19 @@ vcov.MixMod <- function (object, parm = c("all", "fixed-effects", "var-cov","ext
     }
 }
 
+# logLik.MixMod
+# Extracts the marginal log-likelihood from a fitted MixMod object. The returned
+# object is of class "logLik" with attributes:
+#   df:   the number of parameters (= nrow(Hessian))
+#   nobs: the number of groups/clusters (not observations)
+# This allows AIC() and BIC() to work directly on MixMod objects.
+#
+# Arguments:
+#   object: a fitted MixMod object
+#   ...:    currently ignored
+#
+# Returns:
+#   A numeric scalar of class "logLik" with df and nobs attributes.
 logLik.MixMod <- function (object, ...) {
     out <- object$logLik
     attr(out, "df") <- nrow(object$Hessian)
@@ -109,6 +155,22 @@ logLik.MixMod <- function (object, ...) {
     out
 }
 
+# coef.MixMod
+# Returns the cluster-specific (subject-specific) coefficients, computed as the sum of
+# the fixed effects and the empirical Bayes estimates of the random effects:
+#   beta_i = beta + b_i
+# Returns an n_groups x p matrix where n_groups is the number of clusters and p is the
+# number of fixed effects. For sub_model = "zero_part", returns the zero-part coefficients
+# (or gammas alone if no ZI random effects).
+#
+# Arguments:
+#   object:    a fitted MixMod object
+#   sub_model: "main" (default) for the main model coefficients; "zero_part" for ZI part
+#   ...:       currently ignored
+#
+# Returns:
+#   A matrix (n_groups x p) of subject-specific coefficients, or gammas vector if
+#   sub_model = "zero_part" and there are no zero-part random effects.
 coef.MixMod <- function (object, sub_model = c("main", "zero_part"), ...) {
     sub_model <- match.arg(sub_model)
     b <- ranef(object)
@@ -139,6 +201,17 @@ coef.MixMod <- function (object, sub_model = c("main", "zero_part"), ...) {
     }
 }
 
+# fixef.MixMod
+# Extracts the fixed-effects (population-level) coefficients from a fitted MixMod object.
+#
+# Arguments:
+#   object:    a fitted MixMod object
+#   sub_model: "main" (default) returns the main fixed effects (betas);
+#              "zero_part" returns the zero-part fixed effects (gammas)
+#   ...:       currently ignored
+#
+# Returns:
+#   A named numeric vector of fixed-effects coefficients.
 fixef.MixMod <- function(object, sub_model = c("main", "zero_part"), ...) {
     sub_model <- match.arg(sub_model)
     if (sub_model == "main") {
@@ -151,6 +224,19 @@ fixef.MixMod <- function(object, sub_model = c("main", "zero_part"), ...) {
     }
 }
 
+# ranef.MixMod
+# Extracts the empirical Bayes (posterior mode) estimates of the random effects from a
+# fitted MixMod object. These are the modes of p(b_i | y_i, theta_hat).
+#
+# Arguments:
+#   object:    a fitted MixMod object
+#   post_vars: logical; if TRUE, attaches the posterior variance matrices as an attribute
+#              "post_vars" (list of nRE x nRE matrices, one per group) (default: FALSE)
+#   ...:       currently ignored
+#
+# Returns:
+#   An n_groups x nRE matrix of random-effect posterior mode estimates. If post_vars = TRUE,
+#   the matrix has a "post_vars" attribute containing the list of posterior variance matrices.
 ranef.MixMod <- function(object, post_vars = FALSE, ...) {
     out <- object$post_modes
     if (post_vars)
@@ -158,6 +244,25 @@ ranef.MixMod <- function(object, post_vars = FALSE, ...) {
     out
 }
 
+# summary.MixMod
+# Computes a comprehensive summary for a fitted MixMod object, including:
+#   - Fixed-effects coefficient table (Estimate, Std.Err, z-value, p-value)
+#   - Zero-part coefficient table (if ZI model)
+#   - Dispersion/shape parameter table (if model has phis)
+#   - Random-effects covariance matrix D
+#   - Log-likelihood, AIC, BIC
+#   - Number of observations and convergence status
+#
+# The standard errors are derived from the variance-covariance matrix (optionally using
+# the sandwich estimator). Two-sided Wald z-tests are used for fixed effects.
+#
+# Arguments:
+#   object:   a fitted MixMod object
+#   sandwich: logical; if TRUE uses the sandwich (robust) variance estimator (default: FALSE)
+#   ...:      currently ignored
+#
+# Returns:
+#   An object of class "summary.MixMod" (a list). Use print.summary.MixMod() to display.
 summary.MixMod <- function (object, sandwich = FALSE, ...) {
     betas <- fixef(object)
     n_betas <- length(betas)
@@ -193,6 +298,24 @@ summary.MixMod <- function (object, sandwich = FALSE, ...) {
     out
 }
 
+# print.summary.MixMod
+# Prints the full summary of a MixMod model (from summary.MixMod). Displays:
+#   - Model call, family, link function
+#   - Number of observations and groups
+#   - AIC, BIC, log-likelihood
+#   - Random-effects covariance matrix (standard deviations and correlations)
+#   - Fixed-effects coefficient table with z-statistics and p-values
+#   - Zero-part coefficients (if ZI model)
+#   - Dispersion/phi parameters (if applicable)
+#   - Integration method and number of quadrature points
+#   - Optimization method and convergence status
+#
+# Arguments:
+#   x:      an object of class "summary.MixMod" (from summary.MixMod())
+#   digits: number of significant digits (default: max(4, getOption("digits")-4))
+#   ...:    currently ignored
+#
+# Returns: x invisibly.
 print.summary.MixMod <- function (x, digits = max(4, getOption("digits") - 4), ...) {
     cat("\nCall:\n", paste(deparse(x$call), sep = "\n", collapse = "\n"),
         "\n\n", sep = "")
@@ -270,12 +393,37 @@ print.summary.MixMod <- function (x, digits = max(4, getOption("digits") - 4), .
     invisible(x)
 }
 
+# coef.summary.MixMod
+# Extracts the fixed-effects coefficient table from a summary.MixMod object.
+# Returns the data.frame with columns: Estimate, Std.Err, z-value, p-value.
+#
+# Arguments:
+#   object: an object of class "summary.MixMod" (from summary.MixMod())
+#   ...:    currently ignored
 coef.summary.MixMod <- function (object, ...) {
     object$coef_table
 }
 
-confint.MixMod <- function (object, parm = c("fixed-effects", "var-cov","extra", 
-                                             "zero_part"), 
+# confint.MixMod
+# Computes Wald confidence intervals for parameters of a fitted MixMod object.
+# The intervals are based on the normal approximation: estimate ± z_{alpha/2} * SE.
+# For variance-covariance parameters (parm = "var-cov"), confidence intervals are
+# computed on the unconstrained (log-Cholesky) scale and then back-transformed to
+# ensure positivity of variance components.
+# For the negative binomial dispersion parameter, confidence intervals for phis are
+# exponentiated to give intervals for the size parameter.
+#
+# Arguments:
+#   object:   a fitted MixMod object
+#   parm:     which parameters to compute CIs for (see vcov.MixMod for options)
+#   level:    confidence level (default: 0.95)
+#   sandwich: logical; if TRUE uses sandwich SE (default: FALSE)
+#   ...:      currently ignored
+#
+# Returns:
+#   A matrix with three columns: lower CI, upper CI, and point estimate.
+confint.MixMod <- function (object, parm = c("fixed-effects", "var-cov","extra",
+                                             "zero_part"),
                             level = 0.95, sandwich = FALSE, ...) {
     parm <- match.arg(parm)
     V <- vcov(object, sandwich = sandwich)
@@ -346,7 +494,26 @@ confint.MixMod <- function (object, parm = c("fixed-effects", "var-cov","extra",
     out
 }
 
-anova.MixMod <- function (object, object2, test = TRUE, L = NULL, 
+# anova.MixMod
+# Performs hypothesis tests for a fitted MixMod object. Supports two modes:
+#   1. Likelihood ratio test (LRT): when object2 is provided (a nested model), computes
+#      LRT = -2*(logLik(object) - logLik(object2)) and tests against chi-squared with
+#      df = |p2 - p1| degrees of freedom.
+#   2. Wald test: when L (a contrast matrix) is provided instead, computes the Wald test
+#      statistic W = (L*beta)' * (L*V_beta*L')^{-1} * (L*beta) ~ chi-squared(nrow(L)).
+#      With sandwich = TRUE, uses the robust variance estimator.
+#
+# Arguments:
+#   object:   a fitted MixMod object (smaller/null model for LRT, or the model for Wald)
+#   object2:  a second fitted MixMod object (larger/alternative model for LRT)
+#   test:     logical; if TRUE performs the test (default: TRUE)
+#   L:        numeric matrix for a Wald test (ncol must equal number of fixed effects)
+#   sandwich: logical; use sandwich SE for Wald test (default: FALSE)
+#   ...:      currently ignored
+#
+# Returns:
+#   An object of class "aov.MixMod" (list) with test statistics, p-values, AIC, BIC.
+anova.MixMod <- function (object, object2, test = TRUE, L = NULL,
                           sandwich = FALSE, ...) {
     if (missing(object2) && is.null(L))
         stop("either argument 'object2' or argument 'L' needs to be specified.\n")
@@ -406,6 +573,10 @@ anova.MixMod <- function (object, object2, test = TRUE, L = NULL,
     out
 }
 
+# print.aov.MixMod
+# Prints the result of anova.MixMod(). For LRT (two-model comparison), displays a
+# table with AIC, BIC, log-likelihood, LRT statistic, df, and p-value. For Wald tests
+# (L matrix provided), displays the contrast matrix and the chi-squared test results.
 print.aov.MixMod <- function (x, ...) {
     if (is.null(x$L0)) {
         f <- function (dat) {
@@ -444,6 +615,25 @@ print.aov.MixMod <- function (x, ...) {
     invisible(x)
 }
 
+# fitted.MixMod
+# Computes fitted values (predicted means) for a fitted MixMod object. Supports three types:
+#   "mean_subject":     uses fixed effects only (random effects = 0), giving the "average
+#                       subject" prediction; appropriate for population-level inference.
+#   "subject_specific": adds the empirical Bayes random-effect estimates to the fixed effects,
+#                       giving predictions conditional on estimated random effects.
+#   "marginal":         uses marginalized coefficients (via marginal_coefs()) that account for
+#                       the random-effects distribution; appropriate for marginal inference.
+# For zero-inflated models, the fitted values are scaled by (1 - P(structural zero)).
+#
+# Arguments:
+#   object:   a fitted MixMod object
+#   type:     prediction type (default: "mean_subject")
+#   link_fun: a function to apply to the linear predictor before computing the mean
+#             (used for marginal_coefs in non-standard parameterizations)
+#   ...:      currently ignored
+#
+# Returns:
+#   A named numeric vector of fitted means (on the response scale, after the inverse link).
 fitted.MixMod <- function (object, type = c("mean_subject", "subject_specific", "marginal"),
                            link_fun = NULL, ...) {
     type <- match.arg(type)
@@ -493,8 +683,23 @@ fitted.MixMod <- function (object, type = c("mean_subject", "subject_specific", 
     mu
 }
 
+# residuals.MixMod
+# Computes residuals as observed minus fitted values. Uses fitted.MixMod() internally
+# so supports the same three prediction types. Factor responses (binomial) are converted
+# to 0/1 before computing residuals. An optional transformation tasnf_y can be applied
+# to the response before subtracting the fitted values.
+#
+# Arguments:
+#   object:  a fitted MixMod object
+#   type:    "mean_subject" (default), "subject_specific", or "marginal"
+#   link_fun: optional link function transformation (passed to fitted())
+#   tasnf_y: an optional transformation applied to y (default: identity function)
+#   ...:     currently ignored
+#
+# Returns:
+#   A numeric vector of residuals (transformed y minus fitted values).
 residuals.MixMod <- function (object, type = c("mean_subject", "subject_specific",
-                                               "marginal"), link_fun = NULL, 
+                                               "marginal"), link_fun = NULL,
                               tasnf_y = function (x) x, ...) {
     type <- match.arg(type)
     fits <- fitted(object, type = type, link_fun = link_fun)
@@ -505,12 +710,49 @@ residuals.MixMod <- function (object, type = c("mean_subject", "subject_specific
     tasnf_y(y) - fits
 }
 
+# marginal_coefs (generic)
+# Generic function for computing marginalized (population-averaged) coefficients.
+# Dispatches to marginal_coefs.MixMod() for MixMod objects.
 marginal_coefs <- function (object, ...) UseMethod("marginal_coefs")
 
-marginal_coefs.MixMod <- function (object, std_errors = FALSE, link_fun = NULL, 
+# marginal_coefs.MixMod
+# Computes marginalized (population-averaged) coefficients for a fitted MixMod object,
+# following the approach of Hedeker et al. (2017). These coefficients represent the
+# marginal (not conditional) relationship between covariates and the response, averaging
+# over the distribution of the random effects.
+#
+# The method works by:
+#   1. Simulating M samples of random effects b from N(0, D).
+#   2. Computing E_{b}[g^{-1}(X*beta + Z*b)] for each set of covariates.
+#   3. Running a GLM with the marginalized probabilities as responses to extract
+#      the marginal regression coefficients.
+# This is repeated K times (with different random seeds), and the results are averaged.
+# Parallel computation is supported via the parallel package.
+#
+# If std_errors = TRUE, the delta method is used to propagate uncertainty from the
+# model parameters to the marginalized coefficients, using the score contributions
+# stored in the fitted model.
+#
+# Arguments:
+#   object:    a fitted MixMod object
+#   std_errors: logical; compute standard errors via delta method (default: FALSE)
+#   link_fun:  optional custom link function (default: uses the model's link)
+#   M:         number of random-effect samples per iteration (default: 3000)
+#   K:         number of iterations to average over (default: 100)
+#   seed:      random seed for reproducibility (default: 1)
+#   cores:     number of parallel cores (default: detected cores - 1)
+#   sandwich:  logical; use sandwich SE for the delta method (default: FALSE)
+#   ...:       currently ignored
+#
+# Returns:
+#   An object of class "m_coefs" with components:
+#     betas:     marginalized fixed-effects vector
+#     coef_table: coefficient table (if std_errors = TRUE)
+#     vcov:       variance-covariance matrix (if std_errors = TRUE)
+marginal_coefs.MixMod <- function (object, std_errors = FALSE, link_fun = NULL,
                                    M = 3000L, K = 100L,
-                                   seed = 1L, 
-                                   cores = max(parallel::detectCores() - 1, 1), 
+                                   seed = 1L,
+                                   cores = max(parallel::detectCores() - 1, 1),
                                    sandwich = FALSE, ...) {
     offset <- object$offset
     X <- model.matrix(object$Terms$termsX, object$model_frames$mfX)
@@ -652,6 +894,11 @@ marginal_coefs.MixMod <- function (object, std_errors = FALSE, link_fun = NULL,
     out
 }
 
+# print.m_coefs / coef.m_coefs / vcov.m_coefs
+# Methods for the "m_coefs" class returned by marginal_coefs.MixMod().
+# print.m_coefs: displays the marginalized coefficients (with a table if std_errors=TRUE)
+# coef.m_coefs:  extracts the betas vector
+# vcov.m_coefs:  extracts the variance-covariance matrix (NULL if std_errors was FALSE)
 print.m_coefs <- function (x, digits = max(4, getOption("digits") - 4), ...) {
     if (is.null(x$coef_table)) {
         print(round(x$betas, digits = digits))
@@ -677,8 +924,35 @@ vcov.m_coefs <- function (object, ...) {
     }
 }
 
+# effectPlotData (generic)
+# Generic function for computing effect plot data. Dispatches to effectPlotData.MixMod().
 effectPlotData <- function (object, newdata, level, ...) UseMethod("effectPlotData")
 
+# effectPlotData.MixMod
+# Computes predicted values and confidence intervals for a grid of covariate values
+# (newdata), suitable for creating effect plots. Supports both mean-subject predictions
+# (random effects = 0) and marginal predictions (averaged over the random-effects dist.).
+# Also handles continuation ratio (CR) models by computing marginal category probabilities
+# via cr_marg_probs().
+#
+# The confidence intervals are computed via the delta method:
+#   CI = eta_hat ± z_{alpha/2} * sqrt(X_new * V_beta * X_new')
+#
+# Arguments:
+#   object:            a fitted MixMod object
+#   newdata:           data.frame with covariate values for predictions
+#   level:             confidence level (default: 0.95)
+#   marginal:          logical; if TRUE computes marginal (population-averaged) predictions
+#   CR_cohort_varname: character; variable name for the CR cohort in newdata (for CR models)
+#   direction:         "forward" or "backward" for CR models (passed to cr_marg_probs())
+#   K, seed:           passed to marginal_coefs() when marginal = TRUE
+#   sandwich:          logical; use sandwich SE (default: FALSE)
+#   ...:               passed to marginal_coefs()
+#
+# Returns:
+#   The newdata data.frame with additional columns: pred (point prediction on linear
+#   predictor scale), low (lower CI), upp (upper CI), and exp_pred/exp_low/exp_upp
+#   (on the response scale) for non-CR models.
 effectPlotData.MixMod <- function (object, newdata, level = 0.95, marginal = FALSE,
                                    CR_cohort_varname = NULL, direction = NULL,
                                    K = 200, seed = 1, sandwich = FALSE, ...) {
@@ -784,6 +1058,21 @@ effectPlotData.MixMod <- function (object, newdata, level = 0.95, marginal = FAL
     newdata
 }
 
+# create_lists
+# Helper function that organizes a new data.frame (newdata) into the per-group list
+# format needed by predict.MixMod(). Extracts design matrices (X, Z, X_zi, Z_zi),
+# handles missing data (complete-cases filtering), and arranges observations into
+# per-group sublists matching the structure used during model fitting.
+#
+# Arguments:
+#   object:  a fitted MixMod object (provides model terms, factor levels, ID name)
+#   newdata: a data.frame with the same variables as the original data, including the
+#            grouping variable
+#
+# Returns:
+#   A list with components: y_lis, X_lis, Z_lis, offset_lis, X_zi_lis, Z_zi_lis,
+#   offset_zi_lis, id, id_unq, keep (indicator of complete cases), and newdata
+#   (filtered to complete cases).
 create_lists <- function (object, newdata) {
     if (!inherits(object, "MixMod")) {
         stop("only works for 'MixMod' objects.")
@@ -896,10 +1185,44 @@ create_lists <- function (object, newdata) {
          score_phis_fun = score_phis_fun, score_eta_zi_fun = score_eta_zi_fun)
 }
 
-predict.MixMod <- function (object, newdata, newdata2 = NULL, 
+# predict.MixMod
+# Computes predictions (with optional confidence intervals) from a fitted MixMod object
+# for new covariate data. Supports four prediction types:
+#   "mean_subject":     predictions at the population mean (random effects = 0)
+#   "subject_specific": predictions conditional on estimated/new-group random effects;
+#                       for subjects with observed data, uses their estimated random effects;
+#                       for new subjects (in newdata2), samples random effects from the
+#                       posterior using a Metropolis-Hastings algorithm
+#   "marginal":         population-averaged predictions via marginal_coefs()
+#   "zero_part":        predictions for the zero-inflation probability plogis(X_zi * gammas)
+#
+# When se.fit = TRUE, confidence intervals are computed via the delta method (for
+# mean_subject and marginal) or by simulating from the posterior of the parameters
+# (for subject_specific with new subjects, using MH sampling).
+#
+# Arguments:
+#   object:         a fitted MixMod object
+#   newdata:        data.frame with covariate values for prediction
+#   newdata2:       data.frame for new subjects not in the training data (for subject_specific)
+#   type_pred:      "response" (default) or "link" (on the linear predictor scale)
+#   type:           prediction type (see above)
+#   se.fit:         logical; if TRUE computes standard errors/CIs (default: FALSE)
+#   M:              number of Metropolis-Hastings samples for new subjects (default: 300)
+#   df:             degrees of freedom for the t proposal in MH (default: 10)
+#   scale:          scale for the t proposal in MH (default: 0.3)
+#   level:          confidence level (default: 0.95)
+#   seed:           random seed for MH sampling (default: 1)
+#   return_newdata: logical; if TRUE returns newdata with predictions appended (default: FALSE)
+#   sandwich:       logical; use sandwich SE for marginal predictions (default: FALSE)
+#   ...:            currently ignored
+#
+# Returns:
+#   A numeric vector of predictions (or a list with $pred and $se.fit if se.fit = TRUE),
+#   or the newdata data.frame with appended prediction columns if return_newdata = TRUE.
+predict.MixMod <- function (object, newdata, newdata2 = NULL,
                             type_pred = c("response", "link"),
                             type = c("mean_subject", "subject_specific", "marginal", "zero_part"),
-                            se.fit = FALSE, M = 300, df = 10, scale = 0.3, level = 0.95, 
+                            se.fit = FALSE, M = 300, df = 10, scale = 0.3, level = 0.95,
                             seed = 1, return_newdata = FALSE, sandwich = FALSE, ...) {
     type_pred <- match.arg(type_pred)
     type <- match.arg(type)
@@ -1304,9 +1627,36 @@ predict.MixMod <- function (object, newdata, newdata2 = NULL,
     }
 }
 
-simulate.MixMod <- function (object, nsim = 1, seed = NULL, 
+# simulate.MixMod
+# Simulates response data from a fitted MixMod object. Supports two modes:
+#   "subject_specific": simulates using the estimated random effects (empirical Bayes)
+#                       conditional on the data; appropriate for posterior predictive checks
+#   "mean_subject":     simulates without random effects (marginal/population-level)
+#
+# When new_RE = TRUE, new random effects are drawn from N(0, D) for each simulation
+# instead of using the estimated ones.
+# When acount_MLEs_var = TRUE, uncertainty in the fixed effects is also propagated by
+# drawing betas from N(beta_hat, V_beta) (or t-distribution for penalized models).
+#
+# Arguments:
+#   object:          a fitted MixMod object
+#   nsim:            number of simulations (default: 1)
+#   seed:            random seed (default: NULL, uses current RNG state)
+#   type:            "subject_specific" (default) or "mean_subject"
+#   new_RE:          logical; if TRUE draw new random effects for each simulation
+#   acount_MLEs_var: logical; if TRUE also draw new fixed effects from their distribution
+#   sim_fun:         optional custom simulation function(n, mu, phis, eta_zi); if NULL,
+#                    uses the simulate() function from the family object, or falls back to
+#                    a built-in default for binomial, Poisson, etc.
+#   sandwich:        logical; use sandwich SE when acount_MLEs_var = TRUE
+#   ...:             currently ignored
+#
+# Returns:
+#   A data.frame with nsim columns (one per simulation), each containing simulated
+#   response values for all observations.
+simulate.MixMod <- function (object, nsim = 1, seed = NULL,
                              type = c("subject_specific", "mean_subject"),
-                             new_RE = FALSE, acount_MLEs_var = FALSE, sim_fun = NULL, 
+                             new_RE = FALSE, acount_MLEs_var = FALSE, sim_fun = NULL,
                              sandwich = FALSE, ...) {
     if (!exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) 
         runif(1)
@@ -1434,6 +1784,14 @@ simulate.MixMod <- function (object, nsim = 1, seed = NULL,
     out
 }
 
+# model.matrix.MixMod / model.frame.MixMod / terms.MixMod / formula.MixMod
+# Accessor methods for MixMod objects that extract specific model components:
+#   model.matrix.MixMod: returns one of four design matrices (type = "fixed", "random",
+#                        "zi_fixed", "zi_random")
+#   model.frame.MixMod:  returns one of four model frames
+#   terms.MixMod:        returns one of four terms objects
+#   formula.MixMod:      returns one of the four formulas from the original call
+# All support type = c("fixed", "random", "zi_fixed", "zi_random").
 model.matrix.MixMod <- function (object, type = c("fixed", "random", "zi_fixed", "zi_random"), ...) {
     type <- match.arg(type)
     switch(type,
@@ -1476,10 +1834,17 @@ formula.MixMod <- function (x, type = c("fixed", "random", "zi_fixed", "zi_rando
            "zi_fixed" = eval(x$call$zi_fixed), "zi_random" = eval(x$call$zi_random))
 }
 
+# family.MixMod
+# Returns the family object from a fitted MixMod. Allows generic functions that dispatch
+# on the family (e.g., link functions) to work with MixMod objects.
 family.MixMod <- function (object, ...) {
     object$family
 }
 
+# nobs.MixMod
+# Returns the number of observations. With level = 0, returns the number of
+# groups/clusters; with level = 1 (default), returns the total number of observations.
+# This is used by AIC() and BIC() via logLik.MixMod().
 nobs.MixMod <- function (object, level = 1,...) {
     if (level == 0) {
         length(unique(object$id[[1]]))
@@ -1488,7 +1853,14 @@ nobs.MixMod <- function (object, level = 1,...) {
     }
 }
 
-recover_data.MixMod <- function (object, mode = c("fixed-effects", "zero_part", "marginal"), 
+# recover_data.MixMod
+# emmeans integration: recovers the data and predictor information needed by emmeans to
+# set up the reference grid for estimated marginal means. Dispatches to the appropriate
+# terms object based on the mode argument:
+#   "fixed-effects" or "marginal": uses the main fixed-effects terms
+#   "zero_part":                    uses the zero-inflation terms
+# This method is registered via .onLoad() when emmeans is available.
+recover_data.MixMod <- function (object, mode = c("fixed-effects", "zero_part", "marginal"),
                                  ...) {
     fcall <- object$call
     mode <- match.arg(mode)
@@ -1501,8 +1873,18 @@ recover_data.MixMod <- function (object, mode = c("fixed-effects", "zero_part", 
     }
 }
 
-emm_basis.MixMod <- function (object, trms, xlev, grid, 
-                              mode = c("fixed-effects", "zero_part", "marginal"), 
+# emm_basis.MixMod
+# emmeans integration: sets up the basis for computing estimated marginal means (EMMs).
+# Constructs the model matrix X for the prediction grid and returns the appropriate
+# coefficients (betas or marginal_coefs()) and variance-covariance matrix.
+# Three modes:
+#   "fixed-effects": uses fixed effects and their inverse-Hessian variance
+#   "marginal":      uses marginal_coefs() (population-averaged)
+#   "zero_part":     uses zero-inflation coefficients and their variance
+# Sets the link and inverse-link labels for emmeans to display properly.
+# This method is registered via .onLoad() when emmeans is available.
+emm_basis.MixMod <- function (object, trms, xlev, grid,
+                              mode = c("fixed-effects", "zero_part", "marginal"),
                               ...) {
     mode <- match.arg(mode)
     if (mode == "fixed-effects" || mode == "marginal") {
@@ -1547,13 +1929,43 @@ emm_basis.MixMod <- function (object, trms, xlev, grid,
          dfargs = dfargs, misc = misc)
 }
 
+# Effect.MixMod
+# effects package integration: computes effects for a MixMod object by extracting the
+# fixed effects, variance-covariance matrix, and family/link information, then delegating
+# to the default Effect implementation. This method is registered via .onLoad() when
+# the effects package is available.
+#
+# Arguments:
+#   focal.predictors: character vector of predictor names to compute effects for
+#   mod:              a fitted MixMod object
+#   ...:              additional arguments passed to effects::Effect.default()
 Effect.MixMod <- function (focal.predictors, mod, ...) {
     args <- list(call = mod$call, formula = formula(mod), family = mod$family,
                  coefficients = fixef(mod), vcov = vcov(mod, parm = "fixed-effects"))
     effects::Effect.default(focal.predictors, mod, ..., sources = args)
 }
 
-scoring_rules <- function (object, newdata, newdata2 = NULL, max_count = 2000, 
+# scoring_rules
+# Computes proper scoring rules to assess predictive performance of a fitted MixMod.
+# Two scoring rules are computed for each observation:
+#   - Log score:      log(p(y | predicted distribution))
+#   - Brier score:    sum_k (P(Y=k) - I(Y=k))^2, summed over the support of Y
+# These are evaluated using the predicted mean from the "mean_subject" or
+# "subject_specific" predictions (depending on whether newdata2 is provided).
+# The marginal predicted probabilities are computed by summing over a grid of values
+# 0:max_count for count/binomial outcomes.
+#
+# Arguments:
+#   object:          a fitted MixMod object
+#   newdata:         data.frame with covariate values (and optionally the outcome)
+#   newdata2:        data.frame for new subjects (uses subject_specific predictions)
+#   max_count:       maximum count value to sum over for discrete distributions
+#   return_newdata:  logical; if TRUE returns newdata with scoring rule columns appended
+#
+# Returns:
+#   A data.frame with columns "log_score" and "brier_score" for each observation,
+#   or the augmented newdata if return_newdata = TRUE.
+scoring_rules <- function (object, newdata, newdata2 = NULL, max_count = 2000,
                            return_newdata = FALSE) {
     termsX <- object$Terms$termsX
     ND <- if (is.null(newdata2)) newdata else newdata2
@@ -1633,8 +2045,25 @@ scoring_rules <- function (object, newdata, newdata2 = NULL, max_count = 2000,
     if (return_newdata) cbind(ND, result) else result
 }
 
+# VIF (generic)
+# Generic function for variance inflation factors. Dispatches to VIF.MixMod().
 VIF <- function (object, ...) UseMethod("VIF")
 
+# VIF.MixMod
+# Computes generalized variance inflation factors (GVIF) for the fixed effects of a
+# fitted MixMod object. Uses the Fox & Monette (1992) formula:
+#   GVIF = det(R_j) * det(R_{-j}) / det(R)
+# where R is the correlation matrix of the fixed-effects variance-covariance, R_j is the
+# submatrix for term j's columns, and R_{-j} is the remaining submatrix.
+# For multi-df terms, GVIF^(1/(2*df)) is also reported (comparable to the single-df VIF).
+#
+# Arguments:
+#   object: a fitted MixMod object
+#   type:   "fixed" (default) for main fixed effects, or "zi_fixed" for ZI fixed effects
+#   ...:    currently ignored
+#
+# Returns:
+#   A named numeric vector (if all Df = 1) or a matrix with columns GVIF, Df, GVIF^(1/(2*Df)).
 VIF.MixMod <- function (object, type = c("fixed", "zi_fixed"), ...) {
     type <- match.arg(type)
     if (any(is.na(fixef(object, sub_model = if (type == "fixed") "main" else "zero_part")))) 
@@ -1670,7 +2099,22 @@ VIF.MixMod <- function (object, type = c("fixed", "zi_fixed"), ...) {
     result
 }
 
-cooks.distance.MixMod <- function (model, cores = max(parallel::detectCores() - 1, 1), 
+# cooks.distance.MixMod
+# Computes Cook's distances for each group/cluster in a fitted MixMod object. Cook's
+# distance measures the influence of each group on the parameter estimates by refitting
+# the model with each group excluded and measuring the change in the parameter vector:
+#   D_i = (theta_hat - theta_hat(-i))' * H * (theta_hat - theta_hat(-i)) / p
+# where H is the Hessian at the full-model estimates and p is the number of parameters.
+# Refitting is done in parallel (using the parallel package) when cores > 1.
+#
+# Arguments:
+#   model: a fitted MixMod object
+#   cores: number of parallel cores (default: max(detected cores - 1, 1))
+#   ...:   currently ignored
+#
+# Returns:
+#   A named numeric vector of Cook's distances (one per group/cluster).
+cooks.distance.MixMod <- function (model, cores = max(parallel::detectCores() - 1, 1),
                                    ...) {
     data <- model$data
     id <- data[[model$id_name]]
