@@ -180,6 +180,8 @@ def log_dmvnorm(
     float or ndarray
         Log-density value(s).
     """
+    x = np.asarray(x)
+    is_single_eval = x.ndim <= 1
     x = np.atleast_2d(x)
     q = x.shape[-1]
 
@@ -196,7 +198,9 @@ def log_dmvnorm(
 
     maha = np.einsum("...i,ij,...j->...", x, cov_inv, x)
     log_dens = -0.5 * (q * np.log(2 * np.pi) + log_det_cov + maha)
-    return float(log_dens) if log_dens.ndim == 0 else log_dens
+    if is_single_eval:
+        return float(log_dens[0])
+    return log_dens
 
 
 def dmvnorm(
