@@ -9,3 +9,6 @@ src/*.o
 src/*.so
 src/*.dll
 inst/doc
+__pycache__/
+*.py[cod]
+*.pyo
