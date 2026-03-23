@@ -1,6 +1,47 @@
-logLik_mixed <- function (thetas, id, y, N, X, Z, offset, X_zi, Z_zi, offset_zi, GH, 
-                          canonical, user_defined, Xty, Xty_weights, log_dens, mu_fun, var_fun, 
-                          mu.eta_fun, score_eta_fun, score_eta_zi_fun, score_phis_fun, 
+# logLik_mixed
+# Computes the negative marginal log-likelihood of the mixed model using adaptive
+# Gauss-Hermite quadrature. The marginal likelihood integrates out the random effects:
+#   log p(y) = sum_i log integral[ p(y_i | b_i) * p(b_i) ] db_i
+# where p(b_i) = N(0, D). The integral is approximated by the pre-computed AGH quadrature
+# (provided in GH), using the log-sum-exp trick for numerical stability.
+#
+# The function negates the log-likelihood to allow minimization by standard optimizers.
+# If penalized = TRUE, a multivariate t penalty on betas is added.
+#
+# Arguments:
+#   thetas:       numeric vector of all unconstrained parameters (betas, Chol-D, phis, gammas)
+#   id:           integer vector of group indices for each observation
+#   y:            response vector or matrix
+#   N:            binomial totals (NULL if not applicable)
+#   X:            fixed-effects design matrix (n_obs x ncx)
+#   Z:            random-effects design matrix (n_obs x ncz)
+#   offset:       offset for the linear predictor (NULL if not applicable)
+#   X_zi:         zero-inflation fixed-effects design matrix (NULL if not ZI)
+#   Z_zi:         zero-inflation random-effects design matrix (NULL if not ZI)
+#   offset_zi:    offset for the ZI linear predictor (NULL if not applicable)
+#   GH:           list from GHfun() containing quadrature nodes, weights, and log-determinants
+#   canonical:    logical; TRUE for canonical links (binomial/logit, poisson/log)
+#   user_defined: logical; TRUE if a user-defined family is used
+#   Xty:          precomputed X'y cross-product (used with canonical link for efficiency)
+#   Xty_weights:  weighted version of Xty (NULL if no weights)
+#   log_dens:     function(y, eta, mu_fun, phis, eta_zi) returning log-density
+#   mu_fun:       inverse-link function
+#   var_fun:      variance function of the family
+#   mu.eta_fun:   derivative of the mean w.r.t. the linear predictor
+#   score_eta_fun, score_eta_zi_fun, score_phis_fun: analytic score functions (or NULL)
+#   list_thetas:  list skeleton for relist() to parse thetas into betas/D/phis/gammas
+#   diag_D:       logical; TRUE if D is constrained to be diagonal
+#   penalized:    logical; TRUE to add the Student's-t penalty on betas
+#   pen_mu, pen_invSigma, pen_df: penalty hyperparameters (used if penalized = TRUE)
+#   weights:      numeric vector of group weights (NULL if unweighted)
+#   i_contributions: logical; if TRUE, return per-group contributions instead of total
+#
+# Returns:
+#   If i_contributions = FALSE: the negative total marginal log-likelihood (scalar).
+#   If i_contributions = TRUE: a numeric vector of per-group negative log-likelihood contributions.
+logLik_mixed <- function (thetas, id, y, N, X, Z, offset, X_zi, Z_zi, offset_zi, GH,
+                          canonical, user_defined, Xty, Xty_weights, log_dens, mu_fun, var_fun,
+                          mu.eta_fun, score_eta_fun, score_eta_zi_fun, score_phis_fun,
                           list_thetas, diag_D, penalized, pen_mu, pen_invSigma, pen_df,
                           weights, i_contributions = FALSE) {
     thetas <- relist(thetas, skeleton = list_thetas)
@@ -41,9 +82,35 @@ logLik_mixed <- function (thetas, id, y, N, X, Z, offset, X_zi, Z_zi, offset_zi,
     out
 }
 
-score_mixed <- function (thetas, id, y, N, X, Z, offset, X_zi, Z_zi, offset_zi, GH, 
-                         canonical, user_defined, Xty, Xty_weights, log_dens, mu_fun, var_fun, 
-                         mu.eta_fun, score_eta_fun, score_eta_zi_fun, score_phis_fun, 
+# score_mixed
+# Computes the gradient (score vector) of the negative marginal log-likelihood with
+# respect to all unconstrained parameters (betas, Chol-D, phis, gammas).
+#
+# The score is computed by differentiating through the AGH approximation of the marginal
+# log-likelihood. For each parameter group:
+#   - score.betas: uses the expected score with respect to the linear predictor eta,
+#     weighted by the posterior probability p(b|y). For canonical links this simplifies
+#     to X'(E[mu] - y); for non-canonical links uses the chain rule.
+#   - score.D: uses the EM M-step formula for D:
+#     - Diagonal D: 0.5 * (n/D_kk - E[b_k^2] / D_kk^2) re-parameterized for log(D_kk)
+#     - Full D: uses deriv_D() and jacobian2() for the chain rule through the Cholesky param
+#   - score.phis: uses numerical central differences if no analytic score_phis_fun provided
+#   - score.gammas: uses the expected score w.r.t. eta_zi, weighted by posterior
+#
+# The score is negated (to match the negated log-likelihood) so that both logLik_mixed
+# and score_mixed can be passed directly to minimization routines.
+#
+# Arguments: (same as logLik_mixed, plus i_contributions)
+#   i_contributions: if TRUE, returns per-observation (or per-group for score.D) contributions
+#                    as a list; used for the sandwich variance estimator in vcov.MixMod()
+#
+# Returns:
+#   If i_contributions = FALSE: a numeric vector (the gradient of the negative log-likelihood)
+#   If i_contributions = TRUE: a named list with components score.betas, score.D,
+#                               score.phis, score.gammas
+score_mixed <- function (thetas, id, y, N, X, Z, offset, X_zi, Z_zi, offset_zi, GH,
+                         canonical, user_defined, Xty, Xty_weights, log_dens, mu_fun, var_fun,
+                         mu.eta_fun, score_eta_fun, score_eta_zi_fun, score_phis_fun,
                          list_thetas, diag_D, penalized, pen_mu, pen_invSigma, pen_df,
                          i_contributions = FALSE, weights) {
     thetas <- relist(thetas, skeleton = list_thetas)
@@ -292,9 +359,41 @@ score_mixed <- function (thetas, id, y, N, X, Z, offset, X_zi, Z_zi, offset_zi, 
         c(score.betas, score.D, score.phis, score.gammas)
 }
 
+# score_betas
+# Computes the score (gradient) of the negative log-likelihood with respect to the fixed-
+# effects coefficients (betas). Used during the EM Newton-Raphson update for betas.
+#
+# The score for betas is:
+#   - For canonical links: sum_i E_{b|y}[X_i' (mu_i(b) - y_i)] (efficient form using X'y)
+#   - For non-canonical links: -sum_i E_{b|y}[X_i' (y_i - mu_i(b)) * dmu/deta / var(mu_i)]
+#   - For user-defined families: uses the provided score_eta_fun or numerical differences
+# The expectation is approximated using the posterior weights p_by from the EM E-step.
+#
+# Arguments:
+#   betas:         current fixed-effects coefficient vector
+#   y:             response vector or matrix
+#   N:             binomial totals (NULL if not applicable)
+#   X:             fixed-effects design matrix
+#   id:            integer vector of group indices
+#   offset:        offset vector (NULL if not applicable)
+#   weights:       group weights (NULL if unweighted)
+#   phis:          current dispersion parameters (NULL if not applicable)
+#   Ztb:           pre-computed Z * b values (from GHfun output)
+#   eta_zi:        zero-inflation linear predictor (NULL if not ZI)
+#   p_by:          n x k^q matrix of posterior weights from EM E-step
+#   wGH:           quadrature weights vector
+#   canonical:     logical; TRUE for canonical link
+#   user_defined:  logical; TRUE for user-defined family
+#   Xty, Xty_weights: precomputed X'y and weighted X'y (for canonical link efficiency)
+#   log_dens, mu_fun, var_fun, mu.eta_fun: family functions
+#   score_eta_fun, score_phis_fun: analytic score functions (NULL triggers numeric diff)
+#   penalized, pen_mu, pen_invSigma, pen_df: penalty settings
+#
+# Returns:
+#   A numeric vector of length ncx (the gradient of the negative log-likelihood w.r.t. betas).
 score_betas <- function (betas, y, N, X, id, offset, weights, phis, Ztb, eta_zi, p_by, wGH, canonical,
                          user_defined, Xty, Xty_weights, log_dens, mu_fun, var_fun, mu.eta_fun,
-                         score_eta_fun, score_phis_fun, penalized, pen_mu, pen_invSigma, 
+                         score_eta_fun, score_phis_fun, penalized, pen_mu, pen_invSigma,
                          pen_df) {
     eta_y <- as.vector(X %*% betas) + Ztb
     if (!is.null(offset))
@@ -365,6 +464,32 @@ score_betas <- function (betas, y, N, X, id, offset, weights, phis, Ztb, eta_zi,
     out
 }
 
+# score_phis
+# Computes the score (gradient) of the negative log-likelihood with respect to the
+# dispersion/shape parameters phis. Used during the EM Newton-Raphson update for phis.
+#
+# If score_phis_fun is provided (analytic), it is used directly; otherwise, central
+# differences on log_dens are used to approximate the score numerically.
+# The expectation over the posterior is computed using p_by and wGH.
+#
+# Arguments:
+#   phis:           current dispersion parameter vector
+#   y:              response vector or matrix
+#   X:              fixed-effects design matrix
+#   betas:          current fixed-effects coefficients
+#   Ztb:            pre-computed Z * b (from GHfun)
+#   offset:         offset vector (NULL if not applicable)
+#   weights:        group weights (NULL if unweighted)
+#   eta_zi:         zero-inflation linear predictor (NULL if not ZI)
+#   id:             integer vector of group indices
+#   p_by:           n x k^q matrix of posterior weights from EM E-step
+#   log_dens:       log-density function of the family
+#   mu_fun:         inverse-link function
+#   wGH:            quadrature weights vector
+#   score_phis_fun: analytic score function w.r.t. phis, or NULL for numerical diff
+#
+# Returns:
+#   A numeric vector of length n_phis (gradient of negative log-likelihood w.r.t. phis).
 score_phis <- function (phis, y, X, betas, Ztb, offset, weights, eta_zi, id, p_by,
                         log_dens, mu_fun, wGH, score_phis_fun) {
     eta_y <- as.vector(X %*% betas) + Ztb
@@ -395,6 +520,37 @@ score_phis <- function (phis, y, X, betas, Ztb, offset, weights, eta_zi, id, p_b
     }
 }
 
+# score_gammas
+# Computes the score (gradient) of the negative log-likelihood with respect to the
+# zero-part (zero-inflation) fixed-effects coefficients gammas. Used during the EM
+# Newton-Raphson update for gammas.
+#
+# Recomputes eta_zi from the current gammas (since gammas are being updated), then uses
+# either the analytic score_eta_zi_fun or central differences on log_dens w.r.t. eta_zi.
+# The posterior expectation is computed using p_by and wGH.
+#
+# Arguments:
+#   gammas:           current zero-part fixed-effects coefficient vector
+#   y:                response vector or matrix
+#   X:                main fixed-effects design matrix
+#   betas:            current main fixed-effects coefficients
+#   Ztb:              pre-computed Z * b (from GHfun)
+#   offset:           main offset vector (NULL if not applicable)
+#   weights:          group weights (NULL if unweighted)
+#   X_zi:             zero-inflation fixed-effects design matrix
+#   Z_zi:             zero-inflation random-effects design matrix (NULL if no ZI random effects)
+#   Z_zitb:           pre-computed Z_zi * b (from GHfun, NULL if no ZI random effects)
+#   offset_zi:        zero-inflation offset vector (NULL if not applicable)
+#   log_dens:         log-density function of the family
+#   score_eta_zi_fun: analytic score w.r.t. eta_zi, or NULL for numerical diff
+#   phis:             current dispersion parameters (NULL if not applicable)
+#   mu_fun:           inverse-link function
+#   p_by:             n x k^q matrix of posterior weights from EM E-step
+#   wGH:              quadrature weights vector
+#   id:               integer vector of group indices
+#
+# Returns:
+#   A numeric vector of length ncx_zi (gradient of negative log-lik. w.r.t. gammas).
 score_gammas <- function (gammas, y, X, betas, Ztb, offset, weights, X_zi, Z_zi, Z_zitb, offset_zi,
                           log_dens, score_eta_zi_fun, phis, mu_fun, p_by, wGH, id) {
     eta_y <- as.vector(X %*% betas) + Ztb
@@ -426,6 +582,21 @@ score_gammas <- function (gammas, y, X, betas, Ztb, offset, weights, X_zi, Z_zi,
     - sc
 }
 
+# binomial_log_dens
+# Computes the log-density of the binomial distribution for GLMMadaptive's internal use.
+# Handles both binary outcomes (y is a 0/1 vector) and binomial counts (y is a 2-column
+# matrix with successes and failures). Attaches mu_y as an attribute for reuse in
+# score computations.
+#
+# Arguments:
+#   y:      response: numeric vector (binary) or 2-column matrix (successes, failures)
+#   eta:    linear predictor vector
+#   mu_fun: inverse-link function (e.g., plogis for logit link)
+#   phis:   ignored (no dispersion parameter for binomial)
+#   eta_zi: ignored (no zero-inflation for this function)
+#
+# Returns:
+#   Numeric vector of log-density values; attribute "mu_y" contains the fitted means.
 binomial_log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
     mu_y <- mu_fun(eta)
     out <- if (NCOL(y) == 2L) {
@@ -437,6 +608,20 @@ binomial_log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
     out
 }
 
+# poisson_log_dens
+# Computes the log-density of the Poisson distribution for GLMMadaptive's internal use.
+# Implements log p(y | mu) = y*log(mu) - mu - log(y!) directly (equivalent to dpois but
+# vectorized over quadrature points). Attaches mu_y as an attribute for reuse.
+#
+# Arguments:
+#   y:      non-negative integer response vector
+#   eta:    linear predictor vector (log-scale for Poisson)
+#   mu_fun: inverse-link function (exp for log link)
+#   phis:   ignored
+#   eta_zi: ignored
+#
+# Returns:
+#   Numeric vector of log-density values; attribute "mu_y" contains the fitted means.
 poisson_log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
     mu_y <- mu_fun(eta)
     out <- y * log(mu_y) - mu_y - lgamma(y + 1)
@@ -444,6 +629,22 @@ poisson_log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
     out
 }
 
+# gamma_log_dens
+# NOTE: This is a standalone log-density function separate from Gamma.fam(). It uses a
+# different parameterization: shape = mu/scale, scale = exp(phis). This is a legacy
+# function; the preferred approach for Gamma models uses Gamma.fam() which parameterizes
+# as shape = phi, scale = mu/phi (where phi = exp(phis)), providing a cleaner interpretation
+# of phi as the shape/concentration parameter.
+#
+# Arguments:
+#   y:      positive real response vector
+#   eta:    linear predictor (log-scale, so mu = exp(eta))
+#   mu_fun: inverse-link function
+#   phis:   log of the scale parameter
+#   eta_zi: ignored
+#
+# Returns:
+#   Numeric vector of log-density values; attribute "mu_y" contains the fitted means.
 gamma_log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
     mu_y <- mu_fun(eta)
     scale <- exp(phis)
@@ -452,6 +653,24 @@ gamma_log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
     out
 }
 
+# negative.binomial_log_dens
+# Computes the log-density of the negative binomial distribution (NB2 parameterization)
+# where the variance is mu + mu^2/size and size = exp(phis). This standalone function
+# is used for computing initial values; the full family object (negative.binomial()) also
+# defines analytic score functions.
+#
+# log p(y | mu, size) = lgamma(y+size) - lgamma(size) - lgamma(y+1)
+#                     + size*log(size/(mu+size)) + y*log(mu/(mu+size))
+#
+# Arguments:
+#   y:      non-negative integer response vector
+#   eta:    log-scale linear predictor
+#   mu_fun: inverse-link function (exp for log link)
+#   phis:   log of the size (overdispersion) parameter
+#   eta_zi: ignored
+#
+# Returns:
+#   Numeric vector of log-density values; attribute "mu_y" contains the fitted means.
 negative.binomial_log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
     phis <- exp(phis)
     mu <- mu_fun(eta)
@@ -464,6 +683,15 @@ negative.binomial_log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
     out
 }
 
+# negative.binomial
+# Creates a family object for the negative binomial (NB2) distribution with log link.
+# The NB2 parameterization has variance = mu + mu^2/size where size = exp(phis).
+# Provides analytic score_eta_fun and score_phis_fun for efficient optimization.
+# Note: the first make.link() call appears to be a duplicate.
+#
+# Returns:
+#   A list of class "family" with components: family, link, linkfun, linkinv, log_dens,
+#   variance, score_eta_fun, score_phis_fun.
 negative.binomial <- function () {
     stats <- make.link("log")
     stats <- make.link(link = "log")
@@ -512,6 +740,17 @@ negative.binomial <- function () {
               class = "family")
 }
 
+# zi.poisson
+# Creates a family object for the zero-inflated Poisson (ZIP) distribution with log link.
+# The ZIP mixes a point mass at zero with a Poisson distribution:
+#   P(Y=0) = pi + (1-pi)*exp(-mu)
+#   P(Y=y) = (1-pi)*exp(-mu)*mu^y/y!  for y > 0
+# where pi = plogis(eta_zi) is the probability of a structural zero.
+# Provides analytic score_eta_fun and score_eta_zi_fun.
+#
+# Returns:
+#   A list of class "family" with components: family, link, linkfun, linkinv, log_dens,
+#   score_eta_fun, score_eta_zi_fun.
 zi.poisson <- function () {
     stats <- make.link(link = "log")
     log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
@@ -562,6 +801,16 @@ zi.poisson <- function () {
               class = "family")
 }
 
+# zi.negative.binomial
+# Creates a family object for the zero-inflated negative binomial (ZINB) distribution
+# with log link. Mixes a point mass at zero with a NB2 distribution:
+#   P(Y=0) = pi + (1-pi) * NB(0; mu, size)
+#   P(Y=y) = (1-pi) * NB(y; mu, size)  for y > 0
+# where pi = plogis(eta_zi) is the structural zero probability and size = exp(phis).
+# Provides analytic score_eta_fun, score_eta_zi_fun, and score_phis_fun.
+#
+# Returns:
+#   A list of class "family" with the standard components plus all three score functions.
 zi.negative.binomial <- function () {
     stats <- make.link(link = "log")
     log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
@@ -639,6 +888,17 @@ zi.negative.binomial <- function () {
               class = "family")
 }
 
+# hurdle.poisson
+# Creates a family object for the hurdle Poisson distribution with log link.
+# A hurdle model treats zeros and positives as two separate processes:
+#   P(Y=0) = plogis(eta_zi)    [zero part: logistic probability of a zero]
+#   P(Y=y | Y>0) ~ truncated Poisson(mu) / (1 - exp(-mu))  for y > 0
+# Unlike zero-inflation, there are no "structural zeros" from the count process.
+# Also provides a simulate() function for generating data from the fitted model.
+#
+# Returns:
+#   A list of class "family" with components including variance, score_eta_fun,
+#   score_eta_zi_fun, and simulate.
 hurdle.poisson <- function () {
     stats <- make.link("log")
     log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
@@ -687,6 +947,15 @@ hurdle.poisson <- function () {
               class = "family")
 }
 
+# hurdle.negative.binomial
+# Creates a family object for the hurdle negative binomial distribution with log link.
+# Combines a logistic model for zero/non-zero with a zero-truncated NB2 for positive counts:
+#   P(Y=0) = plogis(eta_zi)
+#   P(Y=y | Y>0) ~ truncated NB(mu, size) / (1 - NB(0; mu, size))  for y > 0
+# size = exp(phis). Provides analytic score functions and simulate().
+#
+# Returns:
+#   A list of class "family" with score_eta_fun, score_eta_zi_fun, score_phis_fun, simulate.
 hurdle.negative.binomial <- function () {
     stats <- make.link("log")
     log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
@@ -763,6 +1032,16 @@ hurdle.negative.binomial <- function () {
               class = "family")
 }
 
+# zi.binomial
+# Creates a family object for the zero-inflated binomial distribution with logit link.
+# Mixes a point mass at zero with a binomial distribution:
+#   P(Y=0) = pi + (1-pi) * Binomial(0; N, mu)
+#   P(Y=y | Y>0) = (1-pi) * Binomial(y; N, mu)
+# where pi = plogis(eta_zi). Supports both binary (N=1) and grouped binomial (N>1) responses.
+# Provides analytic score_eta_fun and score_eta_zi_fun; no dispersion parameter.
+#
+# Returns:
+#   A list of class "family" with score_eta_fun, score_eta_zi_fun, score_phis_fun = NULL.
 zi.binomial <- function () {
     stats <- make.link(link = "logit")
     log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
@@ -826,6 +1105,17 @@ zi.binomial <- function () {
               class = "family")
 }
 
+# hurdle.lognormal
+# Creates a family object for the hurdle log-normal distribution with identity link
+# (on the log-scale). Combines a logistic model for structural zeros with a log-normal
+# model for positive values:
+#   P(Y=0) = plogis(eta_zi)
+#   Y | Y>0 ~ LogNormal(eta, sigma^2)  where sigma = exp(phis)
+# Note: the identity link means eta = E[log(Y) | Y>0] (not E[Y]).
+# Provides analytic score functions and simulate().
+#
+# Returns:
+#   A list of class "family" with score_eta_fun, score_eta_zi_fun, score_phis_fun, simulate.
 hurdle.lognormal <- function () {
     stats <- make.link("identity")
     log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
@@ -884,6 +1174,15 @@ hurdle.lognormal <- function () {
               class = "family")
 }
 
+# beta.fam
+# Creates a family object for the beta distribution with logit link, using the
+# mean-dispersion parameterization: Y ~ Beta(mu*phi, (1-mu)*phi) where phi = exp(phis)
+# is the precision (concentration) parameter. The mean is mu = plogis(eta) and
+# variance = mu*(1-mu)/(phi+1).
+# Provides analytic score_eta_fun, score_phis_fun, and simulate().
+#
+# Returns:
+#   A list of class "family" with variance, log_dens, simulate, score_eta_fun, score_phis_fun.
 beta.fam <- function () {
     stats <- make.link("logit")
     log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
@@ -929,6 +1228,18 @@ beta.fam <- function () {
               class = "family")
 }
 
+# hurdle.beta.fam
+# Creates a family object for the hurdle beta distribution with logit link.
+# Combines a logistic model for structural zeros with a beta distribution for positive values:
+#   P(Y=0) = plogis(eta_zi)
+#   Y | Y>0 ~ Beta(mu*phi, (1-mu)*phi)  where phi = exp(phis)
+# Note: in this family mu_fun is applied to eta but the stored "mu_y" is eta itself
+# (the linear predictor), not the mean mu. This is because the mean of the hurdle beta
+# is only meaningful conditional on Y>0.
+# Provides analytic score functions and simulate().
+#
+# Returns:
+#   A list of class "family" with score_eta_fun, score_eta_zi_fun, score_phis_fun, simulate.
 hurdle.beta.fam <- function () {
     stats <- make.link("logit")
     log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
@@ -1003,6 +1314,21 @@ hurdle.beta.fam <- function () {
               class = "family")
 }
 
+# students.t
+# Creates a family object for the Student's-t distribution with user-specified link and
+# fixed degrees of freedom df. The t distribution is parameterized as a location-scale t:
+#   Y ~ t(eta, sigma^2, df) where sigma = exp(phis)
+# This is a heavier-tailed alternative to the normal (Gaussian) for continuous outcomes.
+# The df parameter is fixed (not estimated) and captured in the function's closure.
+# Provides analytic score_eta_fun, score_phis_fun, and simulate().
+#
+# Arguments:
+#   df:   degrees of freedom (required, must be a positive number)
+#   link: link function name (default: "identity")
+#
+# Returns:
+#   A list of class "family" with log_dens, variance, score_eta_fun, score_phis_fun,
+#   simulate, and a df component.
 students.t <- function (df = stop("'df' must be specified"), link = "identity") {
     .df <- df
     env <- new.env(parent = .GlobalEnv)
@@ -1040,6 +1366,21 @@ students.t <- function (df = stop("'df' must be specified"), link = "identity") 
               class = "family")
 }
 
+# compoisson
+# Creates a family object for the Conway-Maxwell-Poisson (CMP) distribution with log link.
+# The CMP generalizes the Poisson by adding a dispersion parameter nu = exp(phis):
+#   P(Y=y) = (lambda^y / (y!)^nu) / Z(lambda, nu)
+# where Z(lambda, nu) = sum_{j=0}^{max} lambda^j / (j!)^nu is the normalizing constant.
+# When nu=1 this reduces to Poisson; nu>1 gives under-dispersion; nu<1 gives over-dispersion.
+# The max argument truncates the infinite normalizing constant sum.
+# NOTE: compoisson() and compoisson2() appear to have identical implementations. Their
+# difference (if any) may have been intended but is not currently reflected in the code.
+#
+# Arguments:
+#   max: truncation point for the normalizing constant Z (default: 100)
+#
+# Returns:
+#   A list of class "family" with log_dens, score_eta_fun, score_phis_fun.
 compoisson <- function (max = 100) {
     stats <- make.link("log")
     .max <- max
@@ -1108,6 +1449,16 @@ compoisson <- function (max = 100) {
               class = "family")
 }
 
+# unit.lindley
+# Creates a family object for the unit Lindley distribution with logit link.
+# The unit Lindley distribution is defined on (0,1) and is parameterized by theta > 0:
+#   f(y) = theta^2 / (1+theta) * (1+y) / (1-y)^3 * exp(-theta * y / (1-y))
+# where the mean mu = 1/(1+theta), linked via logit(mu) = eta.
+# NOTE: This family is currently UNAVAILABLE (the function immediately throws an error).
+# The simulate() function also returns NA. The score_eta_fun is implemented but inactive.
+#
+# Returns:
+#   (never returns; stops with an error message)
 unit.lindley <- function () {
     stop("currently the 'unit.lindley()' family is unavailable.")
     stats <- make.link("logit")
@@ -1147,6 +1498,19 @@ unit.lindley <- function () {
               class = "family")
 }
 
+# compoisson2
+# NOTE: This function appears to be a duplicate of compoisson(). Both implement the same
+# Conway-Maxwell-Poisson distribution with identical log_dens, score_eta_fun, and
+# score_phis_fun. The intended distinction between compoisson() and compoisson2() is
+# unclear - it may have been an alternative parameterization (e.g., via lambda vs. mu)
+# that was never completed. Currently both return a family with family = "Conway Maxwell
+# Poisson" and identical behavior.
+#
+# Arguments:
+#   max: truncation point for the normalizing constant Z (default: 100)
+#
+# Returns:
+#   A list of class "family" - identical to the output of compoisson().
 compoisson2 <- function (max = 100) {
     stats <- make.link("log")
     .max <- max
@@ -1215,6 +1579,23 @@ compoisson2 <- function (max = 100) {
               class = "family")
 }
 
+# find_lambda
+# For the Conway-Maxwell-Poisson distribution, finds the rate parameter lambda such that
+# the mean E[Y] = mu given the dispersion parameter nu. This is needed to simulate from
+# the CMP distribution, since the CMP is typically parameterized by (lambda, nu) but
+# the model is fit via the mean parameterization (mu, nu).
+#
+# The equation E[Y] = sum_{j>=1} j * lambda^j / (j!)^nu / Z(lambda,nu) = mu is solved
+# numerically using uniroot(). Initial values are based on the approximation
+# lambda ~ (mu + (nu-1)/(2*nu))^nu (from Shmueli et al., 2005).
+#
+# Arguments:
+#   mu:    target mean vector (positive values)
+#   nu:    dispersion parameter (positive; nu=1 -> Poisson, nu>1 -> under-dispersion)
+#   sumTo: truncation point for the infinite series (default: 100)
+#
+# Returns:
+#   A numeric vector of lambda values (same length as mu) such that E[Y | lambda, nu] = mu.
 find_lambda <- function (mu, nu, sumTo = 100) {
     j <- seq(1, sumTo)
     nu_log_factorial <- nu * cumsum(log(j))
@@ -1242,6 +1623,20 @@ find_lambda <- function (mu, nu, sumTo = 100) {
     out
 }
 
+# beta.binomial
+# Creates a family object for the beta-binomial distribution, which models over-dispersed
+# binomial data by mixing a beta prior on the success probability with the binomial likelihood.
+# The marginal distribution for Y | size is:
+#   P(Y=y) = C(size,y) * B(y + phi*mu, size - y + phi*(1-mu)) / B(phi*mu, phi*(1-mu))
+# where phi = exp(phis) is the precision parameter and B is the beta function.
+# Supports both logit and cloglog link functions. Provides analytic score functions
+# and simulate() via rbeta/rbinom.
+#
+# Arguments:
+#   link: link function name; either "logit" (default) or "cloglog"
+#
+# Returns:
+#   A list of class "family" with log_dens, score_eta_fun, score_phis_fun, simulate.
 beta.binomial <- function (link = "logit") {
     .link <- link
     env <- new.env(parent = .GlobalEnv)
@@ -1320,6 +1715,16 @@ beta.binomial <- function (link = "logit") {
               class = "family")
 }
 
+# Gamma.fam
+# Creates a family object for the Gamma distribution with log link, using the
+# shape-mean parameterization: Y ~ Gamma(shape=phi, scale=mu/phi) where phi = exp(phis).
+# The mean is E[Y] = mu = exp(eta) and variance = mu^2/phi.
+# This is the preferred Gamma family for GLMMadaptive (not the base R Gamma() family,
+# which lacks log_dens). Provides analytic score_eta_fun, score_phis_fun, and simulate().
+# Also used as a fallback when mixed_model() receives family = Gamma() with log link.
+#
+# Returns:
+#   A list of class "family" with log_dens, score_eta_fun, score_phis_fun, simulate.
 Gamma.fam <- function () {
     stats <- make.link("log")
     log_dens <- function (y, eta, mu_fun, phis, eta_zi) {
@@ -1357,6 +1762,20 @@ Gamma.fam <- function () {
               class = "family")
 }
 
+# censored.normal
+# Creates a family object for censored normally-distributed data with identity link.
+# Handles three types of observations, distinguished by a 2-column response matrix
+# y = cbind(value, indicator) where indicator is:
+#   0: observed (non-censored): contribution = dnorm(y, eta, sigma)
+#   1: left-censored: contribution = pnorm(y, eta, sigma) [P(Y <= threshold)]
+#   2: right-censored: contribution = 1 - pnorm(y, eta, sigma) [P(Y > threshold)]
+# sigma = exp(phis) is the residual standard deviation.
+# Provides analytic score_eta_fun and score_phis_fun with careful handling of
+# boundary cases (probabilities clamped to avoid log(0)). Also provides simulate()
+# which returns uncensored normal draws (censoring is the data structure, not simulated).
+#
+# Returns:
+#   A list of class "family" with log_dens, score_eta_fun, score_phis_fun, simulate.
 censored.normal <- function () {
     stats <- make.link("identity")
     log_dens <- function (y, eta, mu_fun, phis, eta_zi) {

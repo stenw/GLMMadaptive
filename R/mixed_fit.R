@@ -1,4 +1,55 @@
-mixed_fit <- function (y, X, Z, X_zi, Z_zi, id, offset, offset_zi, family, 
+# mixed_fit
+# Core fitting engine for GLMMadaptive. Implements a hybrid EM / quasi-Newton algorithm:
+#
+# Phase 1 (EM, iter_EM iterations):
+#   E-step: compute the posterior distribution of random effects p(b|y) via the AGH
+#           quadrature (GHfun). Update post_modes (posterior modes) for adaptation.
+#   M-step: update parameters via Newton-Raphson sub-steps:
+#     - D (covariance matrix): closed-form EM update D_new = mean(E[bb'])
+#     - betas (fixed effects): one Newton-Raphson step using score_betas() and fd_vec()
+#     - phis (dispersion): one Newton-Raphson step using score_phis() and numer_deriv_vec()
+#     - gammas (zero-part): one Newton-Raphson step using score_gammas() and numer_deriv_vec()
+#
+# Phase 2 (quasi-Newton, iter_qN_outer outer iterations):
+#   If EM did not converge, switches to direct optimization of logLik_mixed() using
+#   optim() (BFGS), nlminb(), or optimParallel. In each outer iteration, the AGH
+#   quadrature points are updated (re-centering at the new posterior modes).
+#
+# After convergence:
+#   - Computes the final log-likelihood, per-group contributions, Hessian (via cd_vec on
+#     score_mixed), and per-observation score contributions (for sandwich estimator).
+#
+# Arguments:
+#   y:             response vector or 2-column matrix (for binomial/censored data)
+#   X:             n_obs x ncx fixed-effects design matrix
+#   Z:             n_obs x ncz random-effects design matrix
+#   X_zi:          n_obs x ncx_zi zero-inflation fixed-effects matrix (NULL if not ZI)
+#   Z_zi:          n_obs x ncz_zi zero-inflation random-effects matrix (NULL if not ZI)
+#   id:            integer vector of group indices (1..n) for each observation
+#   offset:        offset vector for the main linear predictor (NULL if not applicable)
+#   offset_zi:     offset vector for the ZI linear predictor (NULL if not applicable)
+#   family:        a family object (see Fit_Funs.R for available families)
+#   initial_values: a list with elements betas, D (matrix or diagonal vector), phis, gammas
+#   Funs:          a list of functions: log_dens, mu_fun, var_fun, mu.eta_fun, and
+#                  optionally score_eta_fun, score_eta_zi_fun, score_phis_fun
+#   control:       a list of convergence control parameters (from mixed_model())
+#   penalized:     a list with: penalized (logical), pen_mu, pen_invSigma, pen_df
+#   weights:       numeric vector of group weights (NULL if unweighted)
+#
+# Returns:
+#   A list with:
+#     coefficients:             estimated fixed-effects vector (betas)
+#     phis:                     estimated dispersion parameters (NULL if not applicable)
+#     D:                        estimated random-effects covariance matrix
+#     gammas:                   estimated zero-part fixed effects (NULL if not ZI)
+#     post_modes:               n x nRE matrix of posterior mode estimates
+#     post_vars:                list of n posterior variance matrices
+#     logLik:                   marginal log-likelihood at convergence
+#     logLik_contributions:     per-group log-likelihood contributions
+#     Hessian:                  Hessian matrix at convergence (for standard errors)
+#     score_vect_contributions: per-observation score contributions (for sandwich SE)
+#     converged:                logical; TRUE if convergence was achieved
+mixed_fit <- function (y, X, Z, X_zi, Z_zi, id, offset, offset_zi, family,
                        initial_values, Funs, control, penalized, weights) {
     # Create lists of y, X, and Z per id
     y <- unattr(y); X <- unattr(X); Z <- unattr(Z); offset <- unattr(offset)
@@ -348,6 +399,27 @@ mixed_fit <- function (y, X, Z, X_zi, Z_zi, id, offset, offset_zi, family,
          converged = converged)
 }
 
+# optFun
+# Wrapper around optimization routines that dispatches to the optimizer specified in
+# control$optimizer. Supports three optimizers:
+#   - "optim":         uses stats::optim() with the specified method (e.g., BFGS, L-BFGS-B)
+#   - "optimParallel": uses optimParallel::optimParallel() for parallel gradient evaluation
+#   - other (default): uses stats::nlminb() with scale = 1/parscale
+#
+# Called in the quasi-Newton phase of mixed_fit() with objective = logLik_mixed and
+# gradient = score_mixed. Additional arguments (...) are passed to the likelihood/score
+# functions.
+#
+# Arguments:
+#   start:     numeric vector of starting parameter values
+#   objective: function(par, ...) returning the (negative) log-likelihood value
+#   gradient:  function(par, ...) returning the gradient of the objective
+#   parscale:  numeric vector; parameters are internally scaled by this (affects step sizes)
+#   control:   list with optimizer, optim_method, iter_qN, tol3, verbose
+#   ...:       additional arguments forwarded to objective and gradient
+#
+# Returns:
+#   The result object from the optimizer (list with $par, $convergence, etc.)
 optFun <- function (start, objective, gradient, parscale, control, ...) {
     if (control$optimizer == "optim") {
         optim(start, objective, gradient, method = control$optim_method,
