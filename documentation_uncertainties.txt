@@ -1,0 +1,80 @@
+Documentation Uncertainties
+============================
+Flagged during inline documentation pass on R/Fit_Funs.R
+Date: 2026-03-23
+
+------------------------------------------------------------------------
+1. gamma_log_dens vs Gamma.fam() parameterization (R/Fit_Funs.R:633)
+------------------------------------------------------------------------
+gamma_log_dens() is a standalone log-density function that uses a
+different parameterization from Gamma.fam():
+  - gamma_log_dens: shape = mu/scale, scale = exp(phis)
+  - Gamma.fam:      shape = phi, scale = mu/phi  (phi = exp(phis))
+
+Uncertainty: It is not clear whether gamma_log_dens() is intentionally
+kept as a legacy function or whether it is still used somewhere in the
+fitting pipeline. If it is unused it could be a candidate for removal
+to avoid confusion.
+
+------------------------------------------------------------------------
+2. Duplicate make.link() call in negative_binomial() (R/Fit_Funs.R:690)
+------------------------------------------------------------------------
+The negative_binomial() family constructor appears to call make.link()
+twice. The first call looks like a duplicate.
+
+Uncertainty: Whether the first call has any side-effect that is relied
+upon, or whether it is simply dead code left from an earlier refactor.
+
+------------------------------------------------------------------------
+3. hurdle.lognormal() identity link interpretation (R/Fit_Funs.R:1114)
+------------------------------------------------------------------------
+The hurdle log-normal family uses an identity link, meaning:
+  eta = E[log(Y) | Y>0]   (not E[Y])
+
+Uncertainty: The documentation notes this but it is an easy source of
+user confusion. It is not clear whether this is by design (matching the
+log-normal mean-on-log-scale convention) or an oversight. Worth
+confirming with the package author.
+
+------------------------------------------------------------------------
+4. hurdle.beta.fam() mu_y stores eta, not mu (R/Fit_Funs.R:1236)
+------------------------------------------------------------------------
+In hurdle.beta.fam(), mu_fun is applied to eta to obtain mu, but the
+stored "mu_y" slot holds eta (the linear predictor) rather than the
+transformed mean mu.
+
+Uncertainty: The comment in the code explains this is because the
+unconditional mean is only meaningful for Y>0. However, it is unclear
+whether downstream prediction code relies on mu_y being the linear
+predictor or whether it expects the back-transformed mean. This could
+cause subtle bugs in marginal mean computations.
+
+------------------------------------------------------------------------
+5. compoisson() and compoisson2() appear identical (R/Fit_Funs.R:1376 & 1502)
+------------------------------------------------------------------------
+Both functions implement the Conway-Maxwell-Poisson distribution and
+have:
+  - the same log_dens formula
+  - the same score_eta_fun
+  - the same score_phis_fun
+  - the same family name string ("Conway Maxwell Poisson")
+
+Uncertainty: The intended distinction is not documented anywhere. One
+possibility is that compoisson2() was meant to use a different
+parameterization (e.g., via lambda directly rather than via mu) but was
+never completed. This is a candidate for either:
+  (a) consolidating into a single function, or
+  (b) implementing the intended distinction if it was planned.
+
+------------------------------------------------------------------------
+6. unit.lindley() is unavailable (R/Fit_Funs.R:1457)
+------------------------------------------------------------------------
+The unit.lindley() family immediately throws an error and its
+simulate() returns NA. The score_eta_fun is implemented in the body
+but never reachable.
+
+Uncertainty: It is unclear whether:
+  (a) the implementation is work-in-progress and will be completed, or
+  (b) it has been deprecated and the stub is kept for API compatibility.
+The dead score_eta_fun code suggests (a), but there is no TODO comment
+or issue reference to confirm.
