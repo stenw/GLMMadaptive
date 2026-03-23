@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glmmadaptive"
+version = "0.1.0"
+description = "Generalized Linear Mixed Models using Adaptive Gaussian Quadrature"
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "GLMMadaptive contributors" }]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.11",
+    "statsmodels>=0.14",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "rpy2>=3.5",       # live R comparison tests
+]
+# Future: JAX support for automatic differentiation.
+# See docs/jax_roadmap.md for the planned migration path.
+# jax = ["jax>=0.4", "jaxlib>=0.4"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["glmmadaptive*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests that require rpy2 and a working R installation",
+    "regression: tests that compare against saved R reference fixtures",
+]

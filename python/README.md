@@ -1,0 +1,136 @@
+# GLMMadaptive — Python port
+
+Python implementation of the R package
+[GLMMadaptive](https://drizopoulos.github.io/GLMMadaptive/) by Dimitris
+Rizopoulos.  Fits **Generalized Linear Mixed Models** (GLMMs) for clustered /
+repeated-measurements data using **Adaptive Gauss-Hermite Quadrature** (AGH) to
+accurately approximate the marginal likelihood.
+
+## Quick start
+
+```python
+import pandas as pd
+from glmmadaptive import MixedModel
+from glmmadaptive.families import Binomial, Poisson, NegativeBinomial
+
+# Binary random-intercept model
+model = MixedModel(
+    fixed="y ~ time + treatment",
+    random="~ 1 | id",          # random intercept per subject
+    data=df,
+    family=Binomial(),
+)
+res = model.fit()
+print(res.summary())
+
+# Inspect results
+print(res.fixef())              # fixed-effects coefficients
+print(res.ranef())              # empirical Bayes random effects
+print(res.confint())            # 95% Wald confidence intervals
+print(res.vcov())               # variance-covariance of betas
+yhat = res.predict()            # fitted probabilities (mean subject)
+yhat_ss = res.predict(type_="subject_specific")
+anova_table = res.anova(res1, res2)  # LRT between two models
+
+# Random intercept AND slope (full D)
+model2 = MixedModel(
+    fixed="y ~ time",
+    random="~ time | id",       # random intercept + slope
+    data=df,
+    family=Poisson(),
+)
+
+# Diagonal D (uncorrelated random effects)
+model3 = MixedModel(
+    fixed="count ~ x1 + x2",
+    random="~ x1 || id",        # || forces diagonal D
+    data=df,
+    family=NegativeBinomial(),
+)
+```
+
+## Installation
+
+```bash
+pip install -e "python/[dev]"
+```
+
+**Requirements:** Python ≥ 3.10, numpy, scipy, statsmodels, pandas, patsy.
+
+**Optional for live R comparisons:**
+```bash
+pip install rpy2
+# and in R: install.packages("GLMMadaptive")
+```
+
+## Supported families
+
+| Family | Class | Status |
+|--------|-------|--------|
+| Binomial (logit/probit/cloglog) | `Binomial` | ✅ Implemented |
+| Poisson (log) | `Poisson` | ✅ Implemented |
+| Negative Binomial | `NegativeBinomial` | ✅ Implemented |
+| Gamma (log) | `Gamma` | ✅ Implemented |
+| Beta (logit) | `Beta` | ✅ Implemented |
+| Zero-inflated Poisson | `ZIPoisson` | 🚧 Stub |
+| Zero-inflated NB | `ZINegativeBinomial` | 🚧 Stub |
+| Zero-inflated Binomial | `ZIBinomial` | 🚧 Stub |
+| Hurdle Poisson | `HurdlePoisson` | 🚧 Stub |
+| Hurdle NB | `HurdleNegativeBinomial` | 🚧 Stub |
+| Hurdle Beta | `HurdleBeta` | 🚧 Stub |
+| Hurdle log-Normal | `HurdleLogNormal` | 🚧 Stub |
+
+## Testing
+
+```bash
+# Unit tests (no R required)
+pytest tests/unit/ -v
+
+# Regression tests using pre-saved R reference fixtures
+# (first run: Rscript tests/fixtures/generate_r_fixtures.R)
+pytest tests/regression/ -m regression -v
+
+# Live R comparison tests (requires rpy2 + R GLMMadaptive)
+pytest tests/integration/ -m integration -v
+
+# All tests
+pytest
+```
+
+## Comparison with R
+
+Each family implementation is verified against the R package using:
+1. **Saved reference fixtures** — `tests/fixtures/generate_r_fixtures.R`
+   generates JSON files with R model fits; regression tests compare Python
+   results against these.
+2. **Live rpy2 tests** — `tests/integration/` fits the same model in both R and
+   Python within a single pytest session and asserts numerical agreement (betas
+   within 1%, logLik within 0.1 units).
+
+## Future work: JAX backend
+
+See [`docs/jax_roadmap.md`](docs/jax_roadmap.md) for a planned migration from
+finite-difference Hessians to JAX automatic differentiation, enabling exact
+gradients and GPU/TPU acceleration.
+
+## Algorithm
+
+The fitting engine implements the hybrid EM + quasi-Newton algorithm of
+Pinheiro & Bates (1995):
+
+1. **EM phase**: alternates between an E-step (compute posterior distribution
+   of random effects via AGH quadrature) and an M-step (update parameters via
+   Newton-Raphson sub-steps or closed-form EM updates for D).
+2. **Quasi-Newton phase**: if EM doesn't converge, switches to direct
+   maximisation of the marginal log-likelihood using `scipy.optimize.minimize`
+   (BFGS by default) with statsmodels optimizer wrappers.
+
+## Reference
+
+Rizopoulos, D. (2023). *GLMMadaptive: Generalized Linear Mixed Models using
+Adaptive Gaussian Quadrature*. R package version 0.9-8.
+<https://CRAN.R-project.org/package=GLMMadaptive>
+
+Pinheiro, J. C. & Bates, D. M. (1995). Approximations to the log-likelihood
+function in the nonlinear mixed-effects model. *Journal of Computational and
+Graphical Statistics*, **4**(1), 12–35.
