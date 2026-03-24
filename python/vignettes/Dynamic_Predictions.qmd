@@ -124,8 +124,9 @@ Z_zi = np.ones((n * K, 1))
 
 # Linear predictors
 id0 = DF["id"].values - 1      # 0-indexed
-eta_y  = X @ betas + (Z * b_count[id0]).sum(1)
-eta_zi = X_zi @ gammas + (Z_zi * b_zi[id0]).sum(1)
+# Z is a column of ones → Z @ b[row] = b[row], so we can add directly
+eta_y  = X @ betas + b_count[id0]
+eta_zi = X_zi @ gammas + b_zi[id0]
 
 # Simulate NB counts
 from scipy.stats import nbinom
@@ -167,8 +168,9 @@ We fit two models to the training data:
 1. **`fm1`** — Poisson GLMM with fixed effects `sex`, `time`, and their interaction,
    and a random intercept.
 2. **`fm2`** — Zero-inflated negative binomial GLMM with the same count-part
-   structure, plus a fixed effect of `sex` and a random intercept in the
-   zero-inflation part.
+   structure, plus a fixed effect of `sex` in the zero-inflation part.  We omit
+   the ZI random intercept here to keep the combined RE dimension at `q = 1`
+   (1-D adaptive quadrature) and the computation time practical for a vignette.
 
 ```{python}
 from glmmadaptive import MixedModel
@@ -187,13 +189,13 @@ print(res1)
 
 ```{python}
 # Zero-inflated negative binomial model
+# (zi_random omitted to keep q=1 for tractable 1-D quadrature)
 fm2 = MixedModel(
     fixed="y ~ sex * time",
     random="~ 1 | id",
     data=DF_train,
     family=ZINegativeBinomial(),
     zi_fixed="~ sex",
-    zi_random="~ 1 | id",
 )
 res2 = fm2.fit(verbose=False)
 print(res2)
