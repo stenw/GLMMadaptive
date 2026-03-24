@@ -113,6 +113,21 @@ class BaseFamily(ABC):
         """
         return None
 
+    def score_eta_zi(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        phis: Optional[NDArray] = None,
+        eta_zi: Optional[NDArray] = None,
+    ) -> Optional[NDArray]:
+        """
+        Analytic score ∂log p / ∂eta_zi (per observation).
+
+        Only meaningful for zero-inflated families (``has_zi = True``).
+        Return ``None`` to trigger automatic finite-difference fallback.
+        """
+        return None
+
     # ------------------------------------------------------------------
     # Convenience methods
     # ------------------------------------------------------------------
