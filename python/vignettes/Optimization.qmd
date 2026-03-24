@@ -1,0 +1,220 @@
+---
+title: "Optimization and Numerical Integration (Python)"
+author: "Dimitris Rizopoulos"
+date: today
+format:
+  html:
+    toc: true
+    code-fold: false
+jupyter: python3
+---
+
+```{python}
+#| include: false
+import warnings
+warnings.filterwarnings("ignore")
+```
+
+# Estimation Procedure
+
+As described in the GLMMadaptive basics vignette, the log-likelihood function
+behind the mixed models fitted by **glmmadaptive** contains an intractable
+integral over the random effects.  In addition, the mode of the log-likelihood
+function cannot be calculated analytically.  Therefore, maximum likelihood
+estimation requires a combination of numerical integration and optimization.
+
+For the numerical optimization two, interlinked by default, algorithms are
+implemented.  An EM algorithm in which the random effects are treated as
+'missing data', and a quasi-Newton algorithm for direct optimization.  The EM
+algorithm is often a more stable algorithm, especially when the initial values
+are far from the mode of the log-likelihood; however, because it has a linear
+convergence rate it can be slow reaching the mode.  On the other hand,
+quasi-Newton algorithms typically have a super-linear convergence rate, but they
+may have trouble if initiated far from the mode.  For this reason, the
+optimization procedure in **glmmadaptive** starts with the EM algorithm for a
+fixed number of iterations that are used as a refinement of the initial values
+before switching to the quasi-Newton algorithm.
+
+The numerical integration over the random effects is done using the adaptive
+Gauss-Hermite quadrature rule.  This also requires an optimization step of
+finding the modes of the complete-data log-likelihood with respect to the random
+effects, *for each sample unit*.  To decrease the computational cost, the
+optimization procedure does not locate these modes in every iteration but every
+few iterations of the optimization procedure.
+
+The `control` argument of `MixedModel` has a number of keys that enable the
+user to determine how the numerical integration and optimization procedure are
+performed.  The table below maps the R arguments to their Python equivalents:
+
+| R argument | Python `control` key | Default | Description |
+|---|---|---|---|
+| `nAGQ` | `n_agh` | `11` (≤2 REs), `7` otherwise | Number of adaptive GH quadrature points |
+| `iter_EM` | `iter_em` | `30` | Number of first-phase EM iterations |
+| `update_GH_every` | `update_gh_every` | `10` | Update quadrature modes every N EM iterations |
+| `optimizer` | `optimizer` | `"BFGS"` | Quasi-Newton algorithm (`"BFGS"`, `"L-BFGS-B"`, `"Nelder-Mead"`) |
+| `iter_qN_outer` | `iter_qn_outer` | `15` | Number of outer quasi-Newton iterations |
+| `iter_qN` | `iter_qn` | `10` | Inner optimizer iterations per outer iteration |
+| `iter_qN_incr` | `iter_qn_incr` | `10` | Increment to `iter_qn` after each outer iteration |
+
+Note that the R `optimizer` option `"optim"` corresponds to `"BFGS"` (the
+default method of R's `optim()`), while `"nlminb"` does not have a direct
+counterpart — use `"L-BFGS-B"` as the nearest equivalent.
+
+## Controlling the Optimization and Integration
+
+We start by simulating some data for a binary longitudinal outcome:
+
+```{python}
+import numpy as np
+import pandas as pd
+from scipy.special import expit
+
+from glmmadaptive import MixedModel
+from glmmadaptive.families import Binomial
+
+np.random.seed(1234)
+n = 300   # number of subjects
+K = 4     # number of measurements per subject
+t_max = 15
+
+# Categorical time variable: Time1, Time2, Time3, Time4
+time_labels = np.tile([f"Time{k}" for k in range(1, K + 1)], n)
+ids = np.repeat(np.arange(1, n + 1), K)
+sex_labels = np.repeat(["male"] * (n // 2) + ["female"] * (n // 2), K)
+
+DF = pd.DataFrame({"id": ids, "time": time_labels, "sex": sex_labels})
+
+# Build X manually to match R's model.matrix(~ sex * time)
+time_dummies = pd.get_dummies(DF["time"], drop_first=True)  # Time1 is reference
+sex_female   = (DF["sex"] == "female").astype(float)
+interactions = time_dummies.multiply(sex_female, axis=0)
+interactions.columns = [f"sex_female:{c}" for c in interactions.columns]
+
+X = np.column_stack([
+    np.ones(n * K),
+    sex_female,
+    time_dummies.values,
+    interactions.values,
+])
+
+# Only intercept in Z (random intercepts model)
+Z = np.ones((n * K, 1))
+
+# True coefficients: intercept + sex + (K-1) time effects + (K-1) interactions
+betas = np.array([-2.13, 1.0] + [1.2, -1.2] * (K - 1))
+D11 = 1.0
+
+b = np.random.normal(0, np.sqrt(D11), n)
+eta_y = X @ betas + b[DF["id"].values - 1]
+DF["y"] = np.random.binomial(1, expit(eta_y))
+
+DF.head(8)
+```
+
+We fit a mixed effects logistic regression for `y` assuming random intercepts
+for the random-effects part and the main effects of `sex` and `time` for the
+fixed-effects part.  In the call to `MixedModel`, we use the default values for
+all control arguments:
+
+```{python}
+# Default control: iter_em=30, iter_qn_outer=15, n_agh=11, optimizer="BFGS"
+fm_default = MixedModel(
+    fixed="y ~ sex + time",
+    random="~ 1 | id",
+    family=Binomial(),
+    data=DF,
+).fit()
+
+print(fm_default.summary())
+```
+
+In the following example we skip the EM phase entirely (`iter_em=0`) and use the
+`"L-BFGS-B"` optimizer (nearest equivalent to R's `nlminb`).  We also increase
+the inner optimizer iteration budget more aggressively by setting
+`iter_qn_incr=5`:
+
+```{python}
+fm_no_em = MixedModel(
+    fixed="y ~ sex + time",
+    random="~ 1 | id",
+    family=Binomial(),
+    data=DF,
+    control={"iter_em": 0, "optimizer": "L-BFGS-B", "iter_qn_incr": 5},
+).fit()
+
+print(fm_no_em.summary())
+```
+
+In the following call, we allow a large number of EM iterations, giving the EM
+phase the opportunity to converge on its own.  We also update the quadrature
+modes more frequently (every 5 EM iterations) and increase the number of
+quadrature points to 21:
+
+```{python}
+fm_only_em = MixedModel(
+    fixed="y ~ sex + time",
+    random="~ 1 | id",
+    family=Binomial(),
+    data=DF,
+    control={"iter_em": 1000, "update_gh_every": 5, "n_agh": 21},
+).fit()
+
+print(fm_only_em.summary())
+```
+
+To skip the optimization procedure entirely (run nothing at all — useful mainly
+for diagnostics), set both `iter_em` and `iter_qn_outer` to zero:
+
+```{python}
+fm_no_opt = MixedModel(
+    fixed="y ~ sex + time",
+    random="~ 1 | id",
+    family=Binomial(),
+    data=DF,
+    control={"iter_em": 0, "iter_qn_outer": 0},
+).fit()
+# The model returns initial-value estimates without any optimization
+print("logLik at initial values:", fm_no_opt.logLik)
+```
+
+## Advice on Optimization and Numerical Integration Control
+
+- Even though the EM algorithm is generally more stable than the quasi-Newton,
+  it can sometimes overshoot and fail to bring the parameters near the
+  (local) maximum.  In these cases set `iter_em=0` to use only the quasi-Newton
+  phase.
+
+- Convergence problems may sometimes be attributed to poor initial values.  The
+  `initial_values` argument of `MixedModel` can be used to override the default
+  initialization.  For example, for a random intercepts and random slopes model,
+  we could set the initial values for the fixed effects to zero, the variance of
+  the intercepts to 0.5, the variance of the slopes to 0.1, and their covariance
+  to zero:
+
+  ```python
+  MixedModel(
+      fixed="y ~ sex + time",
+      random="~ time | id",
+      family=Binomial(),
+      data=DF,
+      initial_values={
+          "betas": np.zeros(n_fixed_effects),
+          "D": np.array([[0.5, 0.0], [0.0, 0.1]]),
+      },
+  ).fit()
+  ```
+
+- Coefficients that differ by several orders of magnitude can lead to convergence
+  issues.  In such cases it helps to scale variables so that the coefficients are
+  on the same magnitude.
+
+- For dichotomous and count data, (complete) separation issues may be
+  encountered.  The `penalized` argument of R's `mixed_model()` places a
+  Student's t penalty on the fixed effects coefficients (mean 0, scale 1, df 3).
+  **This argument is not yet implemented in the Python port.**
+
+- With regard to the number of quadrature points, a general rule of thumb is to
+  increase `n_agh` until the coefficients and log-likelihood value stabilise.
+  However, using too many quadrature points can also lead to overflow problems.
+  In the majority of cases, 11 to 15 quadrature points suffice.
+```
