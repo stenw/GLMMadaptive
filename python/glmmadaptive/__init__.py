@@ -57,14 +57,20 @@ Stubs / TODO
 * Censored-normal, Student-t, unit-Lindley, COM-Poisson families
 * ``marginal_coefs`` (Hedeker et al. 2017 marginalisation)
 * ``cooks_distance`` (leave-one-group-out diagnostics)
-* ``scoring_rules`` (proper scoring rules)
 * ``VIF`` (generalised variance inflation factors)
 * ``effectPlotData``
+
+Implemented
+~~~~~~~~~~~
+* Dynamic predictions: ``MixModResults.predict_dynamic()``
+* Proper scoring rules: ``scoring_rules()``
+* Zero-inflated families: ``ZIPoisson``, ``ZINegativeBinomial``
 """
 
 from glmmadaptive.core.mixed_model import MixedModel  # noqa: F401
 from glmmadaptive.results.mixmod_results import MixModResults  # noqa: F401
+from glmmadaptive.results.scoring import scoring_rules  # noqa: F401
 from glmmadaptive import families  # noqa: F401
 
 __version__ = "0.1.0"
-__all__ = ["MixedModel", "MixModResults", "families"]
+__all__ = ["MixedModel", "MixModResults", "scoring_rules", "families"]

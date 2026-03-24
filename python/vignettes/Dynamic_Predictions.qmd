@@ -1,0 +1,483 @@
+---
+title: "Dynamic Predictions (Python)"
+author: "Dimitris Rizopoulos"
+date: today
+format:
+  html:
+    toc: true
+    code-fold: false
+jupyter: python3
+---
+
+```{python}
+#| include: false
+import warnings
+warnings.filterwarnings("ignore")
+```
+
+# Introduction
+
+In the setting of longitudinal data, **dynamic individualized predictions** are
+predictions for the longitudinal outcomes that are updated as extra measurements
+are recorded for a subject.
+
+We start by introducing the notation. Let $y_i$ denote the $n_i \times 1$
+longitudinal response vector for the $i$-th subject ($i = 1, \ldots, n$), with
+element $y_{il}$ denoting the value of the longitudinal outcome taken at time
+point $t_{il}$.  We denote all available longitudinal information in the
+original sample as $\mathcal{D}_n = \{y_i; i = 1, \ldots, n\}$.
+
+We are interested in deriving predictions for a **new** subject $j$ from the same
+population who has provided us with a set of longitudinal measurements
+$\mathcal{Y}_j(t) = \{ y_j(t_{jl}); 0 \leq t_{jl} \leq t, l = 1, \ldots, n_j \}$.
+For any future time $u > t$ we are interested in the conditional mean
+
+$$
+\omega_j(u \mid t) = E \{ y_j(u) \mid \mathcal{Y}_j(t), \mathcal{D}_n\}, \quad u > t.
+$$
+
+The time-dynamic nature of $\omega_j(u \mid t)$ is evident because when new
+information is recorded for subject $j$ at time $t' > t$, we can update these
+predictions to obtain $\omega_j(u \mid t')$.
+
+## Statistical Computation
+
+Calculation of these predictions proceeds naturally under the (asymptotic)
+Bayesian paradigm.  Namely, $\omega_j(u \mid t)$ is the expected value of the
+posterior predictive distribution
+
+$$
+p\{y_j(u) \mid \mathcal{Y}_j(t), \mathcal{D}_n\}
+= \int p\{y_j(u) \mid \mathcal{Y}_j(t), \theta\} \, p(\theta \mid \mathcal{D}_n) \; d\theta,
+$$
+
+where $p(\theta \mid \mathcal{D}_n)$ denotes the posterior distribution of the
+parameters.  Under maximum likelihood estimation we approximate this posterior by
+a multivariate normal centred at the MLE $\hat\theta$, with variance-covariance
+matrix $\hat\Omega = \mathcal{I}(\hat\theta)^{-1}$.
+
+The inner integral
+
+$$
+p\{y_j(u) \mid \mathcal{Y}_j(t), \theta\}
+= \int p\{y_j(u) \mid b_j, \theta\} \, p\{b_j \mid \mathcal{Y}_j(t), \theta\} \; db_j
+$$
+
+is approximated by Monte Carlo sampling.  For each draw we:
+
+1. Sample $b_j^{(m)} \sim p\{b_j \mid \mathcal{Y}_j(t), \hat\theta\}$ — the
+   Laplace approximation (multivariate normal) centred at the posterior mode
+   $\hat{b}_j$ with covariance $\hat\Sigma_{b_j}$.
+2. Compute $E\{y_j(u) \mid b_j^{(m)}, \hat\theta\}$ for each future time point.
+
+Mean and quantiles of the $M$ draws give point predictions and confidence
+intervals.
+
+# Illustration
+
+## Data Simulation
+
+We simulate longitudinal count data from a **zero-inflated negative binomial**
+model with random intercepts in both the count and zero-inflation parts.
+
+```{python}
+import numpy as np
+import pandas as pd
+from scipy.special import expit  # plogis equivalent
+
+np.random.seed(12345)
+
+n = 150        # number of subjects (use 150 for speed; R vignette uses 500)
+K = 8          # number of measurements per subject
+t_max = 4.0    # maximum follow-up time
+
+# Design: everyone has a baseline measurement + K-1 random follow-up times
+DF = pd.DataFrame({
+    "id":   np.repeat(np.arange(1, n + 1), K),
+    "time": np.concatenate([
+        np.concatenate([[0.0], np.sort(np.random.uniform(0, t_max, K - 1))])
+        for _ in range(n)
+    ]),
+    "sex":  np.repeat(
+        np.where(np.arange(1, n + 1) <= n // 2, "male", "female"), K
+    ),
+})
+DF["sex"] = pd.Categorical(DF["sex"], categories=["male", "female"])
+
+# True parameters
+betas  = np.array([0.8, -0.5, 0.8, -0.5])   # fixed effects: count part
+shape  = 2.0                                  # NB dispersion
+gammas = np.array([-2.5, 0.5])               # fixed effects: ZI part
+D11    = 1.0                                  # Var(b_count)
+D22    = 0.8                                  # Var(b_zi)
+
+# Simulate random effects
+b_count = np.random.normal(0, np.sqrt(D11), n)
+b_zi    = np.random.normal(0, np.sqrt(D22), n)
+
+# Design matrices (matching patsy's ~ sex * time convention)
+import patsy
+X    = np.asarray(patsy.dmatrix("~ sex * time", DF, return_type="matrix"))
+Z    = np.ones((n * K, 1))
+X_zi = np.asarray(patsy.dmatrix("~ sex", DF, return_type="matrix"))
+Z_zi = np.ones((n * K, 1))
+
+# Linear predictors
+id0 = DF["id"].values - 1      # 0-indexed
+eta_y  = X @ betas + (Z * b_count[id0]).sum(1)
+eta_zi = X_zi @ gammas + (Z_zi * b_zi[id0]).sum(1)
+
+# Simulate NB counts
+from scipy.stats import nbinom
+mu_y = np.exp(eta_y)
+y = nbinom.rvs(n=shape, p=shape / (shape + mu_y))
+
+# Apply structural zeros
+extra_zero = np.random.binomial(1, expit(eta_zi)).astype(bool)
+y[extra_zero] = 0
+
+DF["y"] = y.astype(int)
+
+print(f"Dataset: {len(DF)} observations, {n} subjects")
+print(f"Proportion of zeros: {(DF['y'] == 0).mean():.3f}")
+print(DF.head(8).to_string(index=False))
+```
+
+## Train / Test Split
+
+We split the dataset into a training set (100 subjects) and a test set (50
+subjects).
+
+```{python}
+rng_split = np.random.default_rng(42)
+ids_train = rng_split.choice(np.arange(1, n + 1), size=100, replace=False)
+ids_train = np.sort(ids_train)
+
+DF_train = DF[DF["id"].isin(ids_train)].copy()
+DF_test  = DF[~DF["id"].isin(ids_train)].copy()
+
+print(f"Training: {DF_train['id'].nunique()} subjects, {len(DF_train)} obs")
+print(f"Test:     {DF_test['id'].nunique()} subjects, {len(DF_test)} obs")
+```
+
+## Fitting the Models
+
+We fit two models to the training data:
+
+1. **`fm1`** — Poisson GLMM with fixed effects `sex`, `time`, and their interaction,
+   and a random intercept.
+2. **`fm2`** — Zero-inflated negative binomial GLMM with the same count-part
+   structure, plus a fixed effect of `sex` and a random intercept in the
+   zero-inflation part.
+
+```{python}
+from glmmadaptive import MixedModel
+from glmmadaptive.families import Poisson, ZINegativeBinomial
+
+# Poisson model
+fm1 = MixedModel(
+    fixed="y ~ sex * time",
+    random="~ 1 | id",
+    data=DF_train,
+    family=Poisson(),
+)
+res1 = fm1.fit(verbose=False)
+print(res1)
+```
+
+```{python}
+# Zero-inflated negative binomial model
+fm2 = MixedModel(
+    fixed="y ~ sex * time",
+    random="~ 1 | id",
+    data=DF_train,
+    family=ZINegativeBinomial(),
+    zi_fixed="~ sex",
+    zi_random="~ 1 | id",
+)
+res2 = fm2.fit(verbose=False)
+print(res2)
+```
+
+```{python}
+# Compare log-likelihoods
+print(f"Poisson log-lik:  {res1.logLik:.2f}  AIC: {res1.aic:.2f}")
+print(f"ZINB    log-lik:  {res2.logLik:.2f}  AIC: {res2.aic:.2f}")
+```
+
+## Calculation of Dynamic Predictions
+
+Based on these fitted models, we calculate predictions for the test dataset.
+For each subject we use only their measurements **before time 2** to estimate
+their random effects, and then predict both backward (fitted values in the
+information period) and forward (future predictions from time 2 onward).
+
+```{python}
+from glmmadaptive import scoring_rules
+
+# Split test data into information period (t < 2) and prediction period (t >= 2)
+DF_test_info = DF_test[DF_test["time"] < 2].copy()
+DF_test_pred = DF_test[DF_test["time"] >= 2].copy()
+
+print(f"Information period: {len(DF_test_info)} obs across "
+      f"{DF_test_info['id'].nunique()} subjects")
+print(f"Prediction period:  {len(DF_test_pred)} obs across "
+      f"{DF_test_pred['id'].nunique()} subjects")
+```
+
+```{python}
+# Only keep test subjects that have both info and prediction observations
+ids_both = set(DF_test_info["id"].unique()) & set(DF_test_pred["id"].unique())
+DF_test_info = DF_test_info[DF_test_info["id"].isin(ids_both)].copy()
+DF_test_pred = DF_test_pred[DF_test_pred["id"].isin(ids_both)].copy()
+
+print(f"Subjects with data in both periods: {len(ids_both)}")
+```
+
+```{python}
+# Dynamic predictions — Poisson model
+preds_fm1 = res1.predict_dynamic(
+    newdata=DF_test_info,
+    newdata2=DF_test_pred,
+    se_fit=True,
+    n_mc=200,
+    seed=1,
+)
+
+# Dynamic predictions — ZINB model
+preds_fm2 = res2.predict_dynamic(
+    newdata=DF_test_info,
+    newdata2=DF_test_pred,
+    se_fit=True,
+    n_mc=200,
+    seed=1,
+)
+```
+
+```{python}
+# Combine info and prediction period for plotting
+pred_data_fm2 = pd.concat(
+    [preds_fm2["newdata"], preds_fm2["newdata2"]], ignore_index=True
+).sort_values(["id", "time"])
+
+print("Columns in prediction output:")
+print(pred_data_fm2.columns.tolist())
+print("\nFirst rows:")
+print(pred_data_fm2[["id", "time", "y", "pred", "low", "upp", "zi_probs"]].head(10).to_string(index=False))
+```
+
+## Visualising Dynamic Predictions
+
+We plot the dynamic predictions for 9 randomly selected subjects from the test
+dataset.  The vertical dashed line at $t = 2$ marks the boundary between the
+information period (left) and the prediction period (right).
+
+```{python}
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+# Select 9 subjects for display
+np.random.seed(7)
+plot_ids = np.random.choice(list(ids_both), size=min(9, len(ids_both)), replace=False)
+
+fig, axes = plt.subplots(3, 3, figsize=(12, 9), sharey=False)
+axes = axes.ravel()
+
+for ax, sid in zip(axes, plot_ids):
+    subj = pred_data_fm2[pred_data_fm2["id"] == sid]
+
+    # Observed counts
+    ax.scatter(subj["time"], subj["y"], color="black", s=20, zorder=5,
+               label="Observed")
+
+    # Predicted mean
+    ax.plot(subj["time"], subj["pred"], color="tab:red", linewidth=1.5,
+            label="Expected")
+
+    # 95% CI
+    ax.fill_between(subj["time"], subj["low"], subj["upp"],
+                    color="tab:red", alpha=0.2, label="95% CI")
+
+    # Vertical line at t = 2
+    ax.axvline(x=2.0, color="grey", linestyle="--", linewidth=1.0)
+
+    ax.set_title(f"Subject {sid}", fontsize=9)
+    ax.set_xlabel("Time", fontsize=8)
+    ax.set_ylabel("Count", fontsize=8)
+    ax.tick_params(labelsize=7)
+
+# Legend in last panel
+handles = [
+    plt.scatter([], [], color="black", s=15, label="Observed"),
+    plt.Line2D([0], [0], color="tab:red", lw=1.5, label="Expected"),
+    mpatches.Patch(color="tab:red", alpha=0.3, label="95% CI"),
+    plt.Line2D([0], [0], color="grey", lw=1, ls="--", label="t=2 (info boundary)"),
+]
+fig.legend(handles=handles, loc="lower center", ncol=4, fontsize=8, frameon=False,
+           bbox_to_anchor=(0.5, -0.02))
+
+plt.suptitle("Dynamic Predictions — ZI Negative Binomial Model", fontsize=12, y=1.01)
+plt.tight_layout()
+plt.show()
+```
+
+## Zero-Inflation Probabilities
+
+For the zero-inflated model, the predictions also include estimates of the
+structural-zero probability $\pi_j(t)$.  These are stored in the `zi_probs`
+column of the returned DataFrames.
+
+```{python}
+# Show zi_probs for first few subjects
+zi_summary = (
+    pred_data_fm2[["id", "time", "y", "pred", "zi_probs"]]
+    .head(12)
+)
+print("Predicted structural-zero probability (π) alongside expected counts:")
+print(zi_summary.to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+```
+
+```{python}
+# Average zi_probs by sex and time period
+pred_data_fm2["period"] = np.where(pred_data_fm2["time"] < 2, "info (t<2)", "pred (t≥2)")
+summary_zi = (
+    pred_data_fm2
+    .groupby(["sex", "period"])["zi_probs"]
+    .mean()
+    .reset_index()
+    .rename(columns={"zi_probs": "mean_zi_prob"})
+)
+print("\nMean structural-zero probability by sex and period:")
+print(summary_zi.to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+```
+
+# Proper Scoring Rules
+
+To evaluate the quality of predictions we use the framework of
+[proper scoring rules](https://en.wikipedia.org/wiki/Scoring_rule).  The
+**logarithmic**, **quadratic** (Brier), and **spherical** scoring rules are
+computed by integrating the full predictive probability mass function over the
+posterior of the random effects.
+
+For a discrete predictive distribution $\{P(Y=k)\}_{k \geq 0}$ and an observed
+outcome $y$:
+
+| Rule | Formula | Range | Better |
+|---|---|---|---|
+| Logarithmic | $\log P(Y = y)$ | $(-\infty, 0]$ | closer to 0 |
+| Quadratic | $2P(Y = y) - \sum_k P(Y=k)^2$ | | higher |
+| Spherical | $P(Y = y)/\sqrt{\sum_k P(Y=k)^2}$ | $[0, 1]$ | closer to 1 |
+
+```{python}
+# Scoring rules — Poisson model
+scr_fm1 = scoring_rules(
+    res1,
+    newdata=DF_test_info,
+    newdata2=DF_test_pred,
+    max_count=300,
+    n_mc=100,
+    seed=1,
+)
+
+# Scoring rules — ZINB model
+scr_fm2 = scoring_rules(
+    res2,
+    newdata=DF_test_info,
+    newdata2=DF_test_pred,
+    max_count=300,
+    n_mc=100,
+    seed=1,
+)
+```
+
+```{python}
+# Combine into one dataframe for comparison
+scoring_data = scr_fm1[["id", "time", "y", "logarithmic", "quadratic", "spherical"]].copy()
+scoring_data = scoring_data.rename(columns={
+    "logarithmic": "log_pois",
+    "quadratic":   "quad_pois",
+    "spherical":   "sph_pois",
+})
+scoring_data["log_zinb"]  = scr_fm2["logarithmic"].values
+scoring_data["quad_zinb"] = scr_fm2["quadratic"].values
+scoring_data["sph_zinb"]  = scr_fm2["spherical"].values
+
+# Summary statistics
+print("Mean scoring rules across all prediction-period observations")
+print(f"{'Model':<20} {'Logarithmic':>14} {'Quadratic':>12} {'Spherical':>12}")
+print("-" * 62)
+for label, cols in [
+    ("Poisson", ("log_pois", "quad_pois", "sph_pois")),
+    ("ZI NegBin",  ("log_zinb", "quad_zinb", "sph_zinb")),
+]:
+    row = scoring_data[list(cols)].mean()
+    print(f"{label:<20} {row.iloc[0]:>14.4f} {row.iloc[1]:>12.4f} {row.iloc[2]:>12.4f}")
+```
+
+```{python}
+# Scatter plots: spherical and logarithmic rules vs time
+fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+
+for ax, (col1, col2, ylabel, title) in zip(axes, [
+    ("sph_pois", "sph_zinb", "Spherical scoring rule", "Spherical rule (higher = better)"),
+    ("log_pois", "log_zinb", "Logarithmic scoring rule", "Logarithmic rule (closer to 0 = better)"),
+]):
+    ax.scatter(scoring_data["time"], scoring_data[col1], color="black",
+               s=4, alpha=0.5, label="Poisson")
+    ax.scatter(scoring_data["time"], scoring_data[col2], color="tab:red",
+               s=4, alpha=0.5, label="ZI NegBin")
+
+    # LOWESS-style smooth (rolling mean on time-sorted data)
+    for col, color in [(col1, "black"), (col2, "tab:red")]:
+        srt = scoring_data.sort_values("time")
+        ax.plot(
+            srt["time"].rolling(30, min_periods=1, center=True).mean(),
+            srt[col].rolling(30, min_periods=1, center=True).mean(),
+            color=color, lw=2,
+        )
+
+    ax.set_xlabel("Follow-up time", fontsize=10)
+    ax.set_ylabel(ylabel, fontsize=10)
+    ax.set_title(title, fontsize=10)
+    ax.legend(fontsize=9, markerscale=2)
+    ax.axvline(2.0, color="grey", linestyle=":", linewidth=1)
+
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# Interpretation
+for metric, col1, col2, better_model in [
+    ("Spherical", "sph_pois", "sph_zinb", "higher"),
+    ("Logarithmic", "log_pois", "log_zinb", "closer to 0"),
+]:
+    m1 = scoring_data[col1].mean()
+    m2 = scoring_data[col2].mean()
+    winner = "ZI NegBin" if (m2 > m1 if "higher" in better_model else m2 > m1) else "Poisson"
+    print(f"{metric}: Poisson={m1:.4f}  ZI NegBin={m2:.4f}  → {winner} performs better")
+```
+
+# Summary
+
+In this vignette we illustrated how to:
+
+1. **Simulate** zero-inflated negative binomial longitudinal count data with
+   subject-specific random effects in both the count and zero-inflation parts.
+
+2. **Fit** a Poisson GLMM (`fm1`) and a zero-inflated negative binomial GLMM
+   (`fm2`) using the Python **glmmadaptive** package.
+
+3. **Compute dynamic predictions** via `predict_dynamic()`, which:
+   - Estimates each new subject's random effects from their information-period
+     measurements using the Laplace approximation to the posterior.
+   - Produces predicted means and Monte Carlo confidence intervals for both the
+     information and prediction periods.
+   - Returns structural-zero probabilities (`zi_probs`) for ZI families.
+
+4. **Evaluate prediction quality** via `scoring_rules()` using the logarithmic,
+   quadratic, and spherical proper scoring rules.
+
+The zero-inflated negative binomial model provides better predictions when the
+data contain excess zeros and over-dispersion — both features present in the
+simulated data here.
