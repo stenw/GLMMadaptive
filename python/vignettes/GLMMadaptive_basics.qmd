@@ -1,0 +1,352 @@
+---
+title: "GLMMadaptive Basics (Python)"
+author: "Dimitris Rizopoulos"
+date: today
+format:
+  html:
+    toc: true
+    code-fold: false
+jupyter: python3
+---
+
+```{python}
+#| include: false
+import warnings
+warnings.filterwarnings("ignore")
+```
+
+# Generalized Linear Mixed Models — Theory
+
+## Model Specification
+
+Package **glmmadaptive** provides a suite of functions for fitting and
+post-processing mixed effects models for grouped/clustered outcomes which have a
+distribution other than a normal distribution.  In particular, let $y_i$ denote
+a vector of grouped/clustered outcome for the $i$-th sample unit
+($i = 1, \ldots, n$).  The conditional distribution of $y_i$ given a vector of
+random effects $b_i$ is assumed to be a member of the extended exponential
+family, with linear predictor given by
+$$g\{E(y_i \mid b_i)\} = X_i \beta + Z_i b_i,$$
+where $g(\cdot)$ denotes a monotonic link function, $X_i$ a design matrix for
+the fixed effects coefficients $\beta$, and $Z_i$ a design matrix for the
+random effects coefficients $b_i$.  Typically, matrix $Z_i$ is assumed to be a
+subset of $X_i$.  The random effects are assumed to follow a normal distribution
+with mean 0 and variance-covariance matrix $D$.  In addition, the distribution
+$[y_i \mid b_i]$ may potentially have extra dispersion/shape parameters $\phi$.
+
+## Estimation
+
+The package focuses on settings in which the distribution $[y_i \mid b_i]$ is
+not normal and/or the link function $g(\cdot)$ is not the identity.  In these
+settings, the estimation of the model is complicated by the fact that the
+marginal log-likelihood function of the observed $y_i$ cannot be derived
+analytically.  In particular, the log-likelihood function has the form:
+$$\begin{eqnarray*}
+\ell(\theta) & = & \sum_{i = 1}^n \log p(y_i; \theta)\\
+& = & \sum_{i = 1}^n \log \int p(y_i \mid b_i; \theta) \, p(b_i; \theta) \, db_i,
+\end{eqnarray*}$$
+where $\theta$ denotes the full parameter vector including the fixed effects,
+the extra potential dispersion/shape parameters $\phi$, and the unique elements
+of the covariance matrix $D$, and $p(\cdot)$ denotes a probability density or
+probability mass function.  The integral in the definition of $\ell(\theta)$
+does not have a closed-form solution, and numerical approximations are required
+to obtain the maximum likelihood estimates.
+
+In the literature several approaches have been proposed to approximate such
+integrals, and a nice overview is given in
+[Pinheiro and Chao (2006)](https://doi.org/10.1198/106186006X96962).  A typical
+approach to approximate these integrals is the Laplace approximation.  However,
+the general consensus has been that in the standard but difficult cases of
+binary/dichotomous data and count data with small counts and few repeated
+measurements, the accuracy of this approximation is rather low.  Due to this
+fact, the general consensus is that the gold standard numerical approximation
+method is the adaptive Gaussian quadrature rule (*note: we focus here on
+maximum likelihood estimation; under the Bayesian paradigm, approaches, such as,
+MCMC and Hamiltonian Monte Carlo also provide accurate evaluation of the
+integrals*).  This is more computationally intensive but also more accurate.
+This package provides an efficient implementation of the adaptive Gaussian
+quadrature rule, allowing for multiple correlated random effects (e.g., random
+intercepts, linear and quadratic random slopes) but currently a single grouping
+factor (i.e., no nested or crossed random effects designs).
+
+A hybrid optimization procedure is implemented starting with an EM algorithm,
+treating the random effects as 'missing data', followed by a direct optimization
+procedure with a quasi-Newton algorithm.  Fine control of this procedure is
+allowed via a `control` dictionary passed to `MixedModel`.
+
+# Generalized Linear Mixed Models — Practice
+
+## Mixed Effects Logistic Regression
+
+We illustrate the use of the package in the standard case of a mixed effects
+logistic regression.  That is, the distribution of $[y_i \mid b_i]$ is
+binomial, and the distribution of $[b_i]$ multivariate normal.
+
+We start by simulating some data for a binary longitudinal outcome:
+
+```{python}
+import numpy as np
+import pandas as pd
+from scipy.special import expit  # equivalent to R's plogis()
+
+from glmmadaptive import MixedModel
+from glmmadaptive.families import Binomial, Poisson
+from glmmadaptive.results import MixModResults
+
+np.random.seed(1234)
+n = 100   # number of subjects
+K = 8     # number of measurements per subject
+t_max = 15  # maximum follow-up time
+
+# Construct a DataFrame with the design:
+# everyone has a baseline measurement, then measurements at random follow-up times
+ids = np.repeat(np.arange(1, n + 1), K)
+times = np.concatenate([
+    np.concatenate([[0], np.sort(np.random.uniform(0, t_max, K - 1))])
+    for _ in range(n)
+])
+# gl(2, n/2, labels=c("male","female")) — first n/2 subjects male, next female
+sex_labels = np.repeat(["male"] * (n // 2) + ["female"] * (n // 2), K)
+
+DF = pd.DataFrame({"id": ids, "time": times, "sex": sex_labels})
+
+# Design matrices for the fixed and random effects
+# Equivalent to model.matrix(~ sex * time) with 'female' as the non-reference level
+DF["sex_female"] = (DF["sex"] == "female").astype(float)
+X = np.column_stack([
+    np.ones(n * K),
+    DF["sex_female"],
+    DF["time"],
+    DF["sex_female"] * DF["time"],
+])
+Z = np.column_stack([np.ones(n * K), DF["time"]])
+
+betas = np.array([-2.13, -0.25, 0.24, -0.05])  # fixed effects coefficients
+D11 = 0.48  # variance of random intercepts
+D22 = 0.10  # variance of random slopes
+
+# Simulate random effects
+b = np.column_stack([
+    np.random.normal(0, np.sqrt(D11), n),
+    np.random.normal(0, np.sqrt(D22), n),
+])
+# Linear predictor
+eta_y = X @ betas + np.sum(Z * b[DF["id"].values - 1, :], axis=1)
+# Simulate binary longitudinal data
+DF["y"] = np.random.binomial(1, expit(eta_y))
+
+DF.head(10)
+```
+
+We fit a mixed effects logistic regression for `y`, assuming random intercepts
+for the random-effects part.  The basic model-fitting class in **glmmadaptive**
+is `MixedModel`, and has four required arguments: `fixed` (a patsy formula
+string for the fixed effects), `random` (a formula string for the random
+effects using lme4-style `~ terms | group` syntax), `family` (a family object
+specifying the type of response variable), and `data` (a DataFrame containing
+the variables).  Hence, the call to fit the random intercepts logistic
+regression is:
+
+```{python}
+fm1 = MixedModel(
+    fixed="y ~ sex * time",
+    random="~ 1 | id",
+    family=Binomial(),
+    data=DF,
+).fit()
+```
+
+The `summary()` method gives a detailed output of the model:
+
+```{python}
+print(fm1.summary())
+```
+
+We continue by checking the impact of the chosen number of quadrature points on
+the parameter estimates and the log-likelihood value at convergence.  First, we
+refit the model with an increasing number of quadrature points.  The default
+when the number of random effects is $\leq 2$ is 11 points (`n_agh=11`).  We
+fit then with 15 and 21 points:
+
+```{python}
+fm1_q11 = fm1  # already fitted with n_agh=11 (default)
+
+fm1_q15 = MixedModel(
+    fixed="y ~ sex * time", random="~ 1 | id",
+    family=Binomial(), data=DF,
+    control={"n_agh": 15},
+).fit()
+
+fm1_q21 = MixedModel(
+    fixed="y ~ sex * time", random="~ 1 | id",
+    family=Binomial(), data=DF,
+    control={"n_agh": 21},
+).fit()
+
+models = {"nAGQ=11": fm1_q11, "nAGQ=15": fm1_q15, "nAGQ=21": fm1_q21}
+```
+
+We now extract from the models the estimated fixed effects (using `fixef()`),
+the random-intercept variance from `D`, and the log-likelihood (using
+`.logLik`):
+
+```{python}
+def extract(res):
+    fe = res.fixef()
+    return pd.Series(
+        list(fe) + [res.D[0, 0], res.logLik],
+        index=list(fe.index) + ["var_(Intercept)", "logLik"],
+    )
+
+comparison = pd.DataFrame({name: extract(res) for name, res in models.items()})
+print(comparison.round(5).to_string())
+```
+
+We observe a rather stable model with virtually no differences between the
+different choices of quadrature points.
+
+We first compare the model with a simple logistic regression that does not
+include any random effects:
+
+```{python}
+import statsmodels.formula.api as smf
+from scipy.stats import chi2
+
+# Fit null model (no random effects) — equivalent to R's glm()
+km = smf.logit("y ~ sex * time", data=DF).fit(disp=False)
+
+# Likelihood ratio test (1 df: variance of the random intercept)
+lrt_stat = 2.0 * (fm1.logLik - km.llf)
+p_value  = chi2.sf(lrt_stat, df=1)
+
+print(f"LRT statistic : {lrt_stat:.4f}")
+print(f"Degrees of freedom : 1")
+print(f"p-value : {p_value:.4e}")
+```
+
+We obtain a highly significant p-value suggesting that there are correlations in
+the data that cannot be ignored.  *Note:* the LRT calculates the p-value using
+the standard $\chi^2$ distribution, here with one degree of freedom.  However,
+because the null hypothesis for testing variance parameters is on the boundary
+of the corresponding parameter space, it would be more appropriate to use a
+mixture of $\chi^2$ distributions.
+
+We extend model `fm1` by also including a random slopes term; however, we
+assume that the covariance between the random intercepts and random slopes is
+zero.  This is achieved by using the `||` symbol in the specification of the
+`random` argument (equivalent to R's `~ time || id`):
+
+```{python}
+fm2 = MixedModel(
+    fixed="y ~ sex * time",
+    random="~ time || id",   # || forces a diagonal D
+    family=Binomial(),
+    data=DF,
+).fit()
+```
+
+The likelihood ratio test between the two models is computed with
+`MixModResults.anova()`.  When two result objects are provided, the function
+assumes that the first represents the simpler model (null hypothesis) and the
+second the more complex model (alternative), though the order does not matter —
+the method automatically identifies the larger model:
+
+```{python}
+print(MixModResults.anova(fm1, fm2))
+```
+
+The results suggest that we need the random slopes term.  We continue by testing
+whether the covariance between the random effects terms is zero.  The model
+under the alternative hypothesis is:
+
+```{python}
+fm3 = MixedModel(
+    fixed="y ~ sex * time",
+    random="~ time | id",    # full D: intercept + slope with covariance
+    family=Binomial(),
+    data=DF,
+).fit()
+```
+
+And again the likelihood ratio test is performed by a call to `anova()`:
+
+```{python}
+print(MixModResults.anova(fm2, fm3))
+```
+
+The results now suggest that indeed the covariance between the two random
+effects terms is not statistically different from zero.
+
+## Penalized Mixed Effects Poisson Regression
+
+We continue our illustration with a Poisson mixed effects model.  We start
+again by simulating some data for a Poisson longitudinal outcome:
+
+```{python}
+np.random.seed(1234)
+n = 100
+K = 8
+t_max = 15
+
+ids = np.repeat(np.arange(1, n + 1), K)
+times = np.concatenate([
+    np.concatenate([[0], np.sort(np.random.uniform(0, t_max, K - 1))])
+    for _ in range(n)
+])
+sex_labels = np.repeat(["male"] * (n // 2) + ["female"] * (n // 2), K)
+
+DF2 = pd.DataFrame({"id": ids, "time": times, "sex": sex_labels})
+
+DF2["sex_female"] = (DF2["sex"] == "female").astype(float)
+X2 = np.column_stack([
+    np.ones(n * K),
+    DF2["sex_female"],
+    DF2["time"],
+    DF2["sex_female"] * DF2["time"],
+])
+
+betas2 = np.array([2.13, -0.25, 0.24, -0.05])
+D11_p  = 0.48
+
+b2 = np.random.normal(0, np.sqrt(D11_p), n)
+eta_y2 = X2 @ betas2 + b2[DF2["id"].values - 1]
+DF2["y"] = np.random.poisson(np.exp(eta_y2))
+```
+
+We fit the mixed effects Poisson regression for `y` assuming random intercepts
+for the random-effects part:
+
+```{python}
+gm1 = MixedModel(
+    fixed="y ~ sex * time",
+    random="~ 1 | id",
+    family=Poisson(),
+    data=DF2,
+).fit()
+```
+
+As previously, the `summary()` method gives a detailed output of the model:
+
+```{python}
+print(gm1.summary())
+```
+
+In settings with few subjects, repeated measurements, or separation effects,
+the package also allows placing a penalty on the fixed effects regression
+coefficients $\beta$.  The penalty/prior is in the form of a Student's
+$t$ distribution with mean 0, scale parameter 1, and 3 degrees of freedom,
+placed on all $\beta$ coefficients except the intercept.
+
+> **Note:** The `penalized` argument is not yet implemented in the Python port.
+> It will be available in a future release.  In the R package the penalized model
+> is fitted as:
+>
+> ```r
+> gm2 <- mixed_model(y ~ sex * time, random = ~ 1 | id, data = DF,
+>                    family = poisson(), penalized = TRUE)
+> ```
+>
+> A ridge-like penalty can be specified by adjusting the degrees of freedom of
+> the Student's t prior (e.g., `pen_df = 200` for a near-Gaussian ridge
+> penalty).
+```
