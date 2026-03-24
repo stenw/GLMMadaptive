@@ -23,40 +23,20 @@ and the corresponding `family` objects.  For both model types the user
 specifies the fixed- (and optionally random-) effects formula for the
 logistic regression that governs the zero part.
 
-## Current implementation status
-
-> **Note:** Zero-inflated and hurdle families are **not yet implemented** in
-> the Python port.  The classes listed below exist as stubs — they expose the
-> correct attributes (`has_zi`, `family`, `link`, `n_phis`) but raise
-> `NotImplementedError` for every computational method.  Attempting to
-> construct a `MixedModel` with any of these families will raise
-> `NotImplementedError`.  Full implementations will be available in a future
-> release.
+## Implementation status
 
 | Family (R) | Python class | Status |
 |---|---|---|
-| `zi.poisson()` | `ZIPoisson` | Stub — not yet implemented |
-| `zi.negative.binomial()` | `ZINegativeBinomial` | Stub — not yet implemented |
+| `zi.poisson()` | `ZIPoisson` | **Implemented** |
+| `zi.negative.binomial()` | `ZINegativeBinomial` | **Implemented** |
 | `zi.binomial()` | `ZIBinomial` | Stub — not yet implemented |
 | `hurdle.lognormal()` | `HurdleLogNormal` | Stub — not yet implemented |
 | `hurdle.poisson()` | `HurdlePoisson` | Stub — not yet implemented |
 | `hurdle.negative.binomial()` | `HurdleNegativeBinomial` | Stub — not yet implemented |
 
-```{python}
-from glmmadaptive.families import (
-    ZIPoisson, ZINegativeBinomial,
-    HurdlePoisson, HurdleNegativeBinomial, HurdleLogNormal,
-)
-
-# All stubs declare the correct metadata:
-for cls in [ZIPoisson, ZINegativeBinomial, HurdlePoisson,
-            HurdleNegativeBinomial, HurdleLogNormal]:
-    fam = cls()
-    print(f"{cls.__name__:30s}  has_zi={fam.has_zi}  link={fam.link}  n_phis={fam.n_phis}")
-```
-
-The R equivalents and the expected Python API (once implemented) are shown
-in each section below.
+Sections 1 and 2 below demonstrate `ZIPoisson` and `ZINegativeBinomial` with
+full working Python code.  Sections 3–5 document the hurdle families with R
+reference code and the planned Python API.
 
 ---
 
@@ -64,11 +44,78 @@ in each section below.
 
 The zero-inflated Poisson (ZIP) model uses a logistic regression to model
 the probability of a structural zero, and a Poisson distribution for the
-non-zero counts.  In the R package this is fitted with `family = zi.poisson()`
-and the extra arguments `zi_fixed` and (optionally) `zi_random`:
+non-zero counts.  Pass `family=ZIPoisson()` and `zi_fixed` (and optionally
+`zi_random`) to `MixedModel`:
+
+```{python}
+import numpy as np
+import pandas as pd
+from scipy.special import expit
+from scipy.stats import nbinom
+
+# Simulate longitudinal count data with structural zeros
+rng = np.random.default_rng(42)
+n, K = 100, 8
+ids  = np.repeat(np.arange(n), K)
+sex  = np.repeat(rng.integers(0, 2, n), K).astype(float)
+time = np.tile(np.arange(K), n).astype(float)
+
+b = rng.normal(0, np.sqrt(0.5), n)
+eta_y = 1.0 + 0.3 * sex + 0.15 * time + b[ids]
+mu_y  = np.exp(eta_y)
+
+# NB counts (shape = 3)
+shape = 3.0
+p_nb  = shape / (shape + mu_y)
+y = nbinom.rvs(n=shape, p=p_nb, random_state=rng).astype(float)
+
+# Structural zeros: P(zero) = expit(-1.0 + 0.5*sex)
+pi = expit(-1.0 + 0.5 * sex)
+zi_mask = rng.binomial(1, pi).astype(bool)
+y[zi_mask] = 0.0
+
+DF = pd.DataFrame({"id": ids, "sex": sex, "time": time, "y": y})
+print(DF.head())
+print(f"\nZero proportion: {(DF.y == 0).mean():.2f}")
+```
+
+```{python}
+from glmmadaptive import MixedModel
+from glmmadaptive.families import ZIPoisson
+from glmmadaptive.results import MixModResults
+
+# fm1: ZIP with sex in the zero part (no ZI random effect)
+fm1 = MixedModel(
+    fixed    = "y ~ sex * time",
+    random   = "~ 1 | id",
+    data     = DF,
+    family   = ZIPoisson(),
+    zi_fixed = "~ sex",
+    control  = {"iter_em": 30, "verbose": False},
+).fit()
+
+print(fm1.summary())
+```
+
+```{python}
+# fm2: extend with a random intercept in the zero part
+fm2 = MixedModel(
+    fixed     = "y ~ sex * time",
+    random    = "~ 1 | id",
+    data      = DF,
+    family    = ZIPoisson(),
+    zi_fixed  = "~ sex",
+    zi_random = "~ 1 | id",
+    control   = {"iter_em": 30, "verbose": False},
+).fit()
+
+# Likelihood ratio test
+print(MixModResults.anova(fm1, fm2))
+```
+
+In the R package the same models are fitted with:
 
 ```r
-# R code (not yet available in Python)
 fm1 <- mixed_model(
     y ~ sex * time,
     random   = ~ 1 | id,
@@ -77,39 +124,8 @@ fm1 <- mixed_model(
     zi_fixed = ~ sex
 )
 
-# Extend with a random intercept in the zero part (correlated with count RE)
 fm2 <- update(fm1, zi_random = ~ 1 | id)
-
-# Likelihood ratio test
 anova(fm1, fm2)
-```
-
-The expected Python API (future release):
-
-```python
-# Python API (planned — raises NotImplementedError currently)
-from glmmadaptive import MixedModel
-from glmmadaptive.families import ZIPoisson
-
-fm1 = MixedModel(
-    fixed    = "y ~ sex * time",
-    random   = "~ 1 | id",
-    data     = DF,
-    family   = ZIPoisson(),
-    zi_fixed = "~ sex",
-).fit()
-
-fm2 = MixedModel(
-    fixed     = "y ~ sex * time",
-    random    = "~ 1 | id",
-    data      = DF,
-    family    = ZIPoisson(),
-    zi_fixed  = "~ sex",
-    zi_random = "~ 1 | id",
-).fit()
-
-from glmmadaptive.results import MixModResults
-print(MixModResults.anova(fm1, fm2))
 ```
 
 ---
@@ -117,11 +133,35 @@ print(MixModResults.anova(fm1, fm2))
 ## Zero-Inflated Negative Binomial Mixed Effects Model
 
 The zero-inflated negative binomial (ZINB) model extends ZIP by adding an
-over-dispersion parameter $\theta = \exp(\phi)$ to the non-zero part.  In
-R it is fitted by substituting `zi.negative.binomial()` for `zi.poisson()`:
+over-dispersion parameter $\theta = \exp(\phi)$ to the non-zero part.
+Substitute `ZINegativeBinomial()` for `ZIPoisson()`:
+
+```{python}
+from glmmadaptive.families import ZINegativeBinomial
+
+# gm1: ZINB with sex in the zero part
+gm1 = MixedModel(
+    fixed    = "y ~ sex * time",
+    random   = "~ 1 | id",
+    data     = DF,
+    family   = ZINegativeBinomial(),
+    zi_fixed = "~ sex",
+    control  = {"iter_em": 30, "verbose": False},
+).fit()
+
+print(gm1.summary())
+print(f"\nEstimated theta = exp(phis[0]) = {np.exp(gm1.phis[0]):.3f}")
+```
+
+```{python}
+# Non-nested comparison: ZINB (gm1) vs ZIP+ZI random effect (fm2)
+# test=False suppresses the chi-squared p-value for non-nested models
+print(MixModResults.anova(gm1, fm2))
+```
+
+In R:
 
 ```r
-# R code (not yet available in Python)
 gm1 <- mixed_model(
     y ~ sex * time,
     random   = ~ 1 | id,
@@ -134,21 +174,6 @@ gm1 <- mixed_model(
 anova(gm1, fm2, test = FALSE)
 ```
 
-Expected Python API:
-
-```python
-# Python API (planned)
-from glmmadaptive.families import ZINegativeBinomial
-
-gm1 = MixedModel(
-    fixed    = "y ~ sex * time",
-    random   = "~ 1 | id",
-    data     = DF,
-    family   = ZINegativeBinomial(),
-    zi_fixed = "~ sex",
-).fit()
-```
-
 ---
 
 ## Two-Part Mixed Effects Model for Semi-Continuous Data (HurdleLogNormal)
@@ -158,8 +183,11 @@ logistic regression governs the zero/non-zero split; a linear mixed model
 with log-normal errors governs the positive part.  The estimated dispersion
 parameter `exp(phis)` is the standard deviation of the log-normal errors.
 
+> **Note:** `HurdleLogNormal` is not yet implemented in the Python port.
+> The R reference code and planned API are shown below.
+
 ```r
-# R code (not yet available in Python)
+# R reference
 km1 <- mixed_model(
     y ~ sex * time,
     random   = ~ 1 | id,
@@ -176,10 +204,10 @@ km2 <- update(km1, random = ~ 1 || id, zi_random = ~ 1 | id)
 marginal_coefs(km2)
 ```
 
-Expected Python API:
+Planned Python API:
 
 ```python
-# Python API (planned)
+# Python API (planned — raises NotImplementedError currently)
 from glmmadaptive.families import HurdleLogNormal
 
 km1 = MixedModel(
@@ -201,8 +229,10 @@ The fixed-effects coefficients relate to the mean $\mu$ of the **full**
 (untruncated) Poisson distribution, not to the conditional mean given a
 positive count.
 
+> **Note:** `HurdlePoisson` is not yet implemented in the Python port.
+
 ```r
-# R code (not yet available in Python)
+# R reference
 dm1 <- mixed_model(
     y ~ sex * time,
     random   = ~ time | id,
@@ -215,10 +245,10 @@ dm2 <- update(dm1, zi_random = ~ 1 | id)
 anova(dm1, dm2)
 ```
 
-Expected Python API:
+Planned Python API:
 
 ```python
-# Python API (planned)
+# Python API (planned — raises NotImplementedError currently)
 from glmmadaptive.families import HurdlePoisson
 
 dm1 = MixedModel(
@@ -239,8 +269,10 @@ Poisson family, but replaces the zero-truncated Poisson with a zero-truncated
 negative binomial distribution, thereby accommodating over-dispersion in the
 positive counts.
 
+> **Note:** `HurdleNegativeBinomial` is not yet implemented in the Python port.
+
 ```r
-# R code (not yet available in Python)
+# R reference
 hm1 <- mixed_model(
     y ~ sex * time,
     random   = ~ time | id,
@@ -253,10 +285,10 @@ hm2 <- update(hm1, zi_random = ~ 1 | id)
 anova(hm1, hm2)
 ```
 
-Expected Python API:
+Planned Python API:
 
 ```python
-# Python API (planned)
+# Python API (planned — raises NotImplementedError currently)
 from glmmadaptive.families import HurdleNegativeBinomial
 
 hm1 = MixedModel(

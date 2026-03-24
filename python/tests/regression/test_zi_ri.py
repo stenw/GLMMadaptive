@@ -5,10 +5,6 @@ These tests compare the Python implementation against pre-saved R reference
 outputs in ``tests/fixtures/zi_poisson_ri.json`` and
 ``tests/fixtures/zi_negbinom_ri.json``.
 
-All tests are marked ``xfail`` with ``raises=NotImplementedError`` because
-the ZI/hurdle families are not yet implemented in the Python port.  Once
-implemented, the xfail marks should be removed.
-
 To regenerate fixtures::
 
     Rscript tests/fixtures/generate_r_fixtures.R
@@ -24,19 +20,12 @@ from numpy.testing import assert_allclose
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
 
-_NOT_IMPLEMENTED = pytest.mark.xfail(
-    reason="ZI/hurdle families not yet implemented in Python port",
-    strict=False,
-)
-
-
 def load_fixture(name: str) -> dict:
     path = FIXTURES_DIR / f"{name}.json"
     if not path.exists():
         pytest.skip(f"Fixture '{name}.json' not found — run generate_r_fixtures.R")
     with open(path) as f:
         return json.load(f)
-
 
 def _fit_zip(data, control=None):
     from glmmadaptive import MixedModel
@@ -53,7 +42,6 @@ def _fit_zip(data, control=None):
         control=ctrl,
     ).fit()
 
-
 def _fit_zinb(data, control=None):
     from glmmadaptive import MixedModel
     from glmmadaptive.families import ZINegativeBinomial
@@ -69,7 +57,6 @@ def _fit_zinb(data, control=None):
         control=ctrl,
     ).fit()
 
-
 # ---------------------------------------------------------------------------
 # Zero-inflated Poisson
 # ---------------------------------------------------------------------------
@@ -82,13 +69,13 @@ class TestZIPoissonRI:
     def ref(self):
         return load_fixture("zi_poisson_ri")
 
-    @_NOT_IMPLEMENTED
+    
     def test_loglik_close_to_r(self, ref):
         data = pd.DataFrame(ref["data"])
         result = _fit_zip(data)
         assert_allclose(result.logLik, ref["logLik"], atol=0.5)
 
-    @_NOT_IMPLEMENTED
+    
     def test_betas_close_to_r(self, ref):
         """Count-part fixed effects should match R within 5%."""
         data = pd.DataFrame(ref["data"])
@@ -96,7 +83,7 @@ class TestZIPoissonRI:
         r_betas = np.array(ref["betas"])
         assert_allclose(result.params, r_betas, rtol=0.05, atol=0.05)
 
-    @_NOT_IMPLEMENTED
+    
     def test_gammas_close_to_r(self, ref):
         """Zero-part fixed effects (gammas) should match R within 10%."""
         data = pd.DataFrame(ref["data"])
@@ -104,7 +91,7 @@ class TestZIPoissonRI:
         r_gammas = np.array(ref["gammas"])
         assert_allclose(result.gammas, r_gammas, rtol=0.10, atol=0.10)
 
-    @_NOT_IMPLEMENTED
+    
     def test_D_close_to_r(self, ref):
         """Random-effects variance should match R within 10%."""
         data = pd.DataFrame(ref["data"])
@@ -112,19 +99,19 @@ class TestZIPoissonRI:
         r_D = ref["D"][0][0]
         assert_allclose(result.D[0, 0], r_D, rtol=0.10)
 
-    @_NOT_IMPLEMENTED
+    
     def test_converged(self, ref):
         data = pd.DataFrame(ref["data"])
         result = _fit_zip(data)
         assert result.converged
 
-    @_NOT_IMPLEMENTED
+    
     def test_bse_positive(self, ref):
         data = pd.DataFrame(ref["data"])
         result = _fit_zip(data)
         assert np.all(result.bse > 0)
 
-    @_NOT_IMPLEMENTED
+    
     def test_anova_zip_with_zi_random(self, ref):
         """LRT between ZIP (no ZI RE) and ZIP with ZI random intercept."""
         from glmmadaptive import MixedModel
@@ -148,7 +135,6 @@ class TestZIPoissonRI:
         # fm2 (with ZI random effect) should fit at least as well as fm1
         assert fm2.logLik >= fm1.logLik - 1e-6
 
-
 # ---------------------------------------------------------------------------
 # Zero-inflated Negative Binomial
 # ---------------------------------------------------------------------------
@@ -161,27 +147,27 @@ class TestZINegBinomRI:
     def ref(self):
         return load_fixture("zi_negbinom_ri")
 
-    @_NOT_IMPLEMENTED
+    
     def test_loglik_close_to_r(self, ref):
         data = pd.DataFrame(ref["data"])
         result = _fit_zinb(data)
         assert_allclose(result.logLik, ref["logLik"], atol=1.0)
 
-    @_NOT_IMPLEMENTED
+    
     def test_betas_close_to_r(self, ref):
         data = pd.DataFrame(ref["data"])
         result = _fit_zinb(data)
         r_betas = np.array(ref["betas"])
         assert_allclose(result.params, r_betas, rtol=0.10, atol=0.10)
 
-    @_NOT_IMPLEMENTED
+    
     def test_gammas_close_to_r(self, ref):
         data = pd.DataFrame(ref["data"])
         result = _fit_zinb(data)
         r_gammas = np.array(ref["gammas"])
         assert_allclose(result.gammas, r_gammas, rtol=0.10, atol=0.10)
 
-    @_NOT_IMPLEMENTED
+    
     def test_theta_close_to_r(self, ref):
         """Over-dispersion parameter theta = exp(phis[0]) should match R."""
         data = pd.DataFrame(ref["data"])
@@ -190,7 +176,7 @@ class TestZINegBinomRI:
         py_theta = float(np.exp(result.phis[0]))
         assert_allclose(py_theta, r_theta, rtol=0.15)
 
-    @_NOT_IMPLEMENTED
+    
     def test_converged(self, ref):
         data = pd.DataFrame(ref["data"])
         result = _fit_zinb(data)

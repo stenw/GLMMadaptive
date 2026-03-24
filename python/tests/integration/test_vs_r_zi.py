@@ -4,21 +4,12 @@ Live R comparison tests for zero-inflated mixed models.
 These tests require rpy2 and the R GLMMadaptive package.  They are skipped
 automatically when R is unavailable.
 
-All tests are marked ``xfail`` with ``raises=NotImplementedError`` because
-the ZI/hurdle families are not yet implemented in the Python port.
-Once implemented, the xfail marks should be removed.
 """
 
 import numpy as np
 import pytest
 
 pytestmark = pytest.mark.integration
-
-_NOT_IMPLEMENTED = pytest.mark.xfail(
-    reason="ZI/hurdle families not yet implemented in Python port",
-    strict=False,
-)
-
 
 # ---------------------------------------------------------------------------
 # Shared simulated dataset  (same across ZIP and ZINB comparisons)
@@ -58,7 +49,6 @@ def sim_zi_data():
 
     return pd.DataFrame({"id": ids, "time": time, "y": y})
 
-
 # ---------------------------------------------------------------------------
 # Zero-inflated Poisson
 # ---------------------------------------------------------------------------
@@ -93,7 +83,6 @@ def r_zip_fit(r_env, sim_zi_data):
         "bse":    np.array(ro.r("r_bse_zip")),
     }
 
-
 @pytest.fixture(scope="module")
 def py_zip_result(sim_zi_data):
     from glmmadaptive import MixedModel
@@ -107,37 +96,30 @@ def py_zip_result(sim_zi_data):
         control={"iter_em": 50, "verbose": False},
     ).fit()
 
-
 class TestZIPoissonVsR:
 
-    @_NOT_IMPLEMENTED
     def test_betas(self, py_zip_result, r_zip_fit):
         np.testing.assert_allclose(
             py_zip_result.params, r_zip_fit["betas"], rtol=0.05, atol=0.05
         )
 
-    @_NOT_IMPLEMENTED
     def test_gammas(self, py_zip_result, r_zip_fit):
         np.testing.assert_allclose(
             py_zip_result.gammas, r_zip_fit["gammas"], rtol=0.10, atol=0.10
         )
 
-    @_NOT_IMPLEMENTED
     def test_D(self, py_zip_result, r_zip_fit):
         np.testing.assert_allclose(
             py_zip_result.D[0, 0], r_zip_fit["D"], rtol=0.10
         )
 
-    @_NOT_IMPLEMENTED
     def test_loglik(self, py_zip_result, r_zip_fit):
         np.testing.assert_allclose(
             py_zip_result.logLik, r_zip_fit["logLik"], atol=0.5
         )
 
-    @_NOT_IMPLEMENTED
     def test_converged(self, py_zip_result):
         assert py_zip_result.converged
-
 
 # ---------------------------------------------------------------------------
 # Zero-inflated Negative Binomial
@@ -174,7 +156,6 @@ def r_zinb_fit(r_env, sim_zi_data):
         "logLik": float(ro.r("r_loglik_zinb")[0]),
     }
 
-
 @pytest.fixture(scope="module")
 def py_zinb_result(sim_zi_data):
     from glmmadaptive import MixedModel
@@ -188,38 +169,31 @@ def py_zinb_result(sim_zi_data):
         control={"iter_em": 50, "verbose": False},
     ).fit()
 
-
 class TestZINegBinomVsR:
 
-    @_NOT_IMPLEMENTED
     def test_betas(self, py_zinb_result, r_zinb_fit):
         np.testing.assert_allclose(
             py_zinb_result.params, r_zinb_fit["betas"], rtol=0.10, atol=0.10
         )
 
-    @_NOT_IMPLEMENTED
     def test_gammas(self, py_zinb_result, r_zinb_fit):
         np.testing.assert_allclose(
             py_zinb_result.gammas, r_zinb_fit["gammas"], rtol=0.10, atol=0.10
         )
 
-    @_NOT_IMPLEMENTED
     def test_theta(self, py_zinb_result, r_zinb_fit):
         r_theta = float(np.exp(r_zinb_fit["phis"][0]))
         py_theta = float(np.exp(py_zinb_result.phis[0]))
         np.testing.assert_allclose(py_theta, r_theta, rtol=0.15)
 
-    @_NOT_IMPLEMENTED
     def test_loglik(self, py_zinb_result, r_zinb_fit):
         np.testing.assert_allclose(
             py_zinb_result.logLik, r_zinb_fit["logLik"], atol=1.0
         )
 
-    @_NOT_IMPLEMENTED
     def test_converged(self, py_zinb_result):
         assert py_zinb_result.converged
 
-    @_NOT_IMPLEMENTED
     def test_zinb_better_than_zip(self, py_zinb_result, r_zinb_fit, py_zip_result):
         """
         ZINB (with estimated theta) should fit at least as well as ZIP when
