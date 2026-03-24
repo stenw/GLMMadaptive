@@ -1,0 +1,263 @@
+---
+title: "Zero-Inflated and Two-Part Mixed Effects Models (Python)"
+author: "Dimitris Rizopoulos"
+date: today
+format:
+  html:
+    toc: true
+    code-fold: false
+jupyter: python3
+---
+
+```{python}
+#| include: false
+import warnings
+warnings.filterwarnings("ignore")
+```
+
+# Mixed Models with an Extra Zero Part
+
+`MixedModel` in **glmmadaptive** can also be used to fit zero-inflated and
+two-part mixed effects models.  For both types of models, a suitable `family`
+object must be specified, and the arguments `zi_fixed` and `zi_random` of
+`MixedModel` come into play.  In these arguments the user specifies the fixed-
+and random-effects formulas of the logistic regression for the zero-part of the
+distribution.  Setting `zi_random=None` (the default) fits a zero-part with
+only fixed effects and no random effects.
+
+## Status of Python implementations
+
+| Family (R) | Python class | Status |
+|---|---|---|
+| `zi.poisson()` | `ZIPoisson` | **Implemented** |
+| `zi.negative.binomial()` | `ZINegativeBinomial` | **Implemented** |
+| `hurdle.lognormal()` | `HurdleLogNormal` | Stub — not yet implemented |
+| `hurdle.poisson()` | `HurdlePoisson` | Stub — not yet implemented |
+| `hurdle.negative.binomial()` | `HurdleNegativeBinomial` | Stub — not yet implemented |
+
+The two implemented families are demonstrated below with full Python code.
+Sections covering the hurdle families include the R equivalents and a note
+explaining that Python support will be added in a future release.
+
+## Zero-Inflated Poisson Mixed Effects Model
+
+We start by showing how to fit a zero-inflated Poisson (ZIP) mixed effects
+model.  First, we simulate longitudinal data from a zero-inflated negative
+binomial distribution:
+
+```{python}
+import numpy as np
+import pandas as pd
+from scipy.special import expit          # equivalent to R's plogis()
+from scipy.stats import nbinom as sp_nbinom
+
+from glmmadaptive import MixedModel
+from glmmadaptive.families import ZIPoisson, ZINegativeBinomial
+from glmmadaptive.results import MixModResults
+
+np.random.seed(1234)
+n = 100   # number of subjects
+K = 8     # number of measurements per subject
+t_max = 5 # maximum follow-up time
+
+# Construct a DataFrame with the design:
+# everyone has a baseline measurement, then measurements at random follow-up times
+ids = np.repeat(np.arange(1, n + 1), K)
+times = np.concatenate([
+    np.concatenate([[0], np.sort(np.random.uniform(0, t_max, K - 1))])
+    for _ in range(n)
+])
+sex_labels = np.repeat(["male"] * (n // 2) + ["female"] * (n // 2), K)
+
+DF = pd.DataFrame({"id": ids, "time": times, "sex": sex_labels})
+DF["sex_female"] = (DF["sex"] == "female").astype(float)
+
+# Design matrices for the fixed and random effects — non-zero part
+# Equivalent to model.matrix(~ sex * time) with 'female' as the non-reference level
+X = np.column_stack([
+    np.ones(n * K),
+    DF["sex_female"],
+    DF["time"],
+    DF["sex_female"] * DF["time"],
+])
+Z = np.ones((n * K, 1))  # random intercept only
+
+# Design matrices for the zero part  (~ sex)
+X_zi = np.column_stack([np.ones(n * K), DF["sex_female"]])
+Z_zi = np.ones((n * K, 1))  # random intercept for zero part
+
+betas  = np.array([1.5, 0.05, 0.05, -0.03])  # fixed effects — non-zero part
+shape  = 2.0                                   # NB size parameter
+gammas = np.array([-1.5, 0.5])                # fixed effects — zero part
+D11    = 0.5   # variance of random intercepts (non-zero part)
+D22    = 0.4   # variance of random intercepts (zero part)
+
+# Simulate correlated random effects
+b = np.column_stack([
+    np.random.normal(0, np.sqrt(D11), n),
+    np.random.normal(0, np.sqrt(D22), n),
+])
+
+# Linear predictors
+id_idx = DF["id"].values - 1
+eta_y  = X @ betas  + (Z  * b[id_idx, :1]).sum(axis=1)
+eta_zi = X_zi @ gammas + (Z_zi * b[id_idx, 1:2]).sum(axis=1)
+
+# Simulate negative binomial counts (scipy uses p = size/(size + mu))
+mu_y = np.exp(eta_y)
+p_nb = shape / (shape + mu_y)
+DF["y"] = sp_nbinom.rvs(n=shape, p=p_nb, random_state=1234)
+
+# Introduce structural zeros
+zi_mask = np.random.binomial(1, expit(eta_zi)).astype(bool)
+DF.loc[zi_mask, "y"] = 0
+
+print(f"Proportion of zeros: {(DF['y'] == 0).mean():.3f}")
+DF.head(10)
+```
+
+A zero-inflated Poisson mixed model with only fixed effects in the zero part is
+fitted with the following call to `MixedModel`.  The only changes from the
+standard Poisson model are `family=ZIPoisson()` and the extra `zi_fixed`
+argument:
+
+```{python}
+fm1 = MixedModel(
+    fixed="y ~ sex * time",
+    random="~ 1 | id",
+    family=ZIPoisson(),
+    data=DF,
+    zi_fixed="~ sex",
+).fit()
+
+print(fm1.summary())
+```
+
+As in the R package, only the log link is available for the non-zero part and
+the logit link for the zero part.  The estimated fixed effects for the two parts
+are interpreted accordingly.
+
+We extend `fm1` by allowing also for random intercepts in the zero part.  By
+default the random intercept of the non-zero part and the random intercept of
+the zero part are **correlated** (full covariance matrix $D$):
+
+```{python}
+fm2 = MixedModel(
+    fixed="y ~ sex * time",
+    random="~ 1 | id",
+    family=ZIPoisson(),
+    data=DF,
+    zi_fixed="~ sex",
+    zi_random="~ 1 | id",
+).fit()
+
+print(fm2.summary())
+```
+
+We test whether we need the extra random effect in the zero part using a
+likelihood ratio test:
+
+```{python}
+print(MixModResults.anova(fm1, fm2))
+```
+
+The results suggest that the extra random effect improves the fit of the model.
+
+## Zero-Inflated Negative Binomial Mixed Effects Model
+
+We continue with the same data, but now account for the potential
+over-dispersion using a zero-inflated negative binomial model.  The only
+difference in the call is the `family` argument:
+
+```{python}
+gm1 = MixedModel(
+    fixed="y ~ sex * time",
+    random="~ 1 | id",
+    family=ZINegativeBinomial(),
+    data=DF,
+    zi_fixed="~ sex",
+).fit()
+
+print(gm1.summary())
+```
+
+Because the data were actually generated from a negative binomial distribution,
+`gm1` (ZINB) and `fm2` (ZIP with ZI random effect) are **non-nested**.  We can
+still compare them via information criteria by calling `anova()` without a
+formal LRT:
+
+```{python}
+# Non-nested comparison: display AIC / BIC without a p-value
+res = MixModResults.anova(gm1, fm2)
+print(res)
+```
+
+Accounting for over-dispersion tends to improve the fit more than including the
+extra random intercept in the zero part.
+
+## Two-Part Mixed Effects Model for Semi-Continuous Data (HurdleLogNormal)
+
+> **Note:** `HurdleLogNormal` is not yet implemented in the Python port.
+> It will be available in a future release.  In the R package the model is
+> defined via a custom family object and fitted as:
+>
+> ```r
+> km1 <- mixed_model(y ~ sex * time, random = ~ 1 | id, data = DF,
+>                    family = hurdle.lognormal(), n_phis = 1,
+>                    zi_fixed = ~ sex)
+>
+> # Extend with a random intercept in the zero part (uncorrelated)
+> km2 <- update(km1, random = ~ 1 || id, zi_random = ~ 1 | id)
+>
+> # Marginalised coefficients for (1 - π) × E{log(Y)}
+> marginal_coefs(km2)
+> ```
+>
+> The hurdle log-normal family models continuous data with excess zeros.  A
+> logistic regression governs whether the response is zero, and a linear mixed
+> model with log-normal errors governs the positive part.  The estimated
+> dispersion parameter `exp(phis)` gives the standard deviation of the
+> log-normal error terms.
+
+## Two-Part / Hurdle Poisson Mixed Effects Model
+
+> **Note:** `HurdlePoisson` is not yet implemented in the Python port.
+> It will be available in a future release.  In the R package hurdle Poisson
+> and hurdle negative binomial models are fitted as:
+>
+> ```r
+> dm1 <- mixed_model(y ~ sex * time, random = ~ time | id, data = DF,
+>                    family = hurdle.poisson(), zi_fixed = ~ sex)
+>
+> # Extend with a random intercept in the zero part
+> dm2 <- update(dm1, zi_random = ~ 1 | id)
+>
+> anova(dm1, dm2)
+> ```
+>
+> The hurdle Poisson family models count data with excess zeros via a two-part
+> model: a logistic regression for the zero / non-zero split and a
+> zero-truncated Poisson distribution for the positive counts.  Note that the
+> fixed-effects coefficients for the positive counts relate to the mean $\mu$
+> of the **full** (untruncated) Poisson distribution — not to the mean
+> conditional on being positive, which is $\mu / (1 - e^{-\mu})$.
+
+## Two-Part / Hurdle Negative Binomial Mixed Effects Model
+
+> **Note:** `HurdleNegativeBinomial` is not yet implemented in the Python
+> port.  It will be available in a future release.  In the R package:
+>
+> ```r
+> hm1 <- mixed_model(y ~ sex * time, random = ~ time | id, data = DF,
+>                    family = hurdle.negative.binomial(), zi_fixed = ~ sex)
+>
+> # Extend with a random intercept in the zero part
+> hm2 <- update(hm1, zi_random = ~ 1 | id)
+>
+> anova(hm1, hm2)
+> ```
+>
+> The hurdle negative binomial family is identical in structure to the hurdle
+> Poisson family but replaces the zero-truncated Poisson with a zero-truncated
+> negative binomial distribution, thereby accommodating over-dispersion in the
+> positive counts.
