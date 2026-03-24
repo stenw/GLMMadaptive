@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 from scipy.optimize import minimize
-from scipy.linalg import cho_factor, cho_solve, cholesky, LinAlgError
+from scipy.linalg import cholesky, LinAlgError
 from typing import Callable, Tuple
 
 
@@ -210,23 +210,31 @@ class GHQuadrature:
         self.b_nodes: list[NDArray] = []        # per group, (n_pts, q)
         self.log_weights: list[NDArray] = []    # per group, (n_pts,)
 
+        from scipy.linalg import solve_triangular
+
         for i in range(n_groups):
             H_i = self.neg_hessians[i]
             try:
-                L_i, lower = cho_factor(H_i, lower=True)
-                # Solve L_i^T b_k = sqrt(2) x_k  =>  b_k = sqrt(2) L_i^{-T} x_k
-                # cho_factor stores L in lower form; L_i^{-T} solves upper triangular
-                b_k = np.sqrt(2.0) * cho_solve(
-                    (L_i, lower), x_grid.T
-                ).T + self.modes[i]  # (n_pts, q)
-                # log|det(L_i^{-T})| = -log|det(L_i)| = -sum(log(diag(L_i)))
-                log_det_correction = -np.sum(np.log(np.abs(np.diag(
-                    cholesky(H_i, lower=True)
-                ))))
+                L_i = cholesky(H_i, lower=True)
+                # Transform: b_k = sqrt(2) * L_i^{-T} x_k + b̂_i
+                # Solve the upper-triangular system L_i^T z = x_k  →  z = L_i^{-T} x_k
+                # x_grid.T has shape (q, n_pts); result has shape (q, n_pts)
+                b_k = (
+                    np.sqrt(2.0) * solve_triangular(L_i.T, x_grid.T, lower=False).T
+                    + self.modes[i]
+                )  # (n_pts, q)
+
+                # Log-weight correction (Jacobian of the transformation):
+                #   |db/dx| = (sqrt(2))^q * |det(L_i)|^{-1}
+                # In log-space:
+                #   (q/2)*log(2) - sum(log(diag(L_i)))
+                log_det_correction = (
+                    (q / 2.0) * np.log(2.0) - np.sum(np.log(np.diag(L_i)))
+                )
             except (LinAlgError, np.linalg.LinAlgError):
                 # Fallback: centre at mode, unit covariance
                 b_k = np.sqrt(2.0) * x_grid + self.modes[i]
-                log_det_correction = 0.0
+                log_det_correction = (q / 2.0) * np.log(2.0)
 
             self.b_nodes.append(b_k)
             self.log_weights.append(log_w_base + log_det_correction)
