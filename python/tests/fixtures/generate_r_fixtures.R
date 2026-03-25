@@ -17,6 +17,7 @@
 #   poisson_ri_predictions.json — predict() and ranef() for Poisson RI
 #   zi_poisson_ri.json        — zero-inflated Poisson RI model
 #   zi_negbinom_ri.json       — zero-inflated Negative Binomial RI model
+#   gaussian_ri.json          — Gaussian RI (fitted via students.t df=1e6)
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -243,5 +244,45 @@ cat("  betas:",  paste(round(zinb_fixture$betas,  4), collapse = ", "), "\n")
 cat("  gammas:", paste(round(zinb_fixture$gammas, 4), collapse = ", "), "\n")
 cat("  theta (exp(phis)):", round(exp(fm_zinb$phis), 4), "\n")
 cat("  logLik:", round(zinb_fixture$logLik, 4), "\n\n")
+
+# ---------------------------------------------------------------------------
+# 7. Gaussian (Normal) random-intercept model
+#    R rejects gaussian() in mixed_model(), so we use students.t(df=1e6)
+#    which is numerically indistinguishable from Gaussian.
+# ---------------------------------------------------------------------------
+cat("Fitting Gaussian (students.t df=1e6) random-intercept model...\n")
+
+n_subjects <- 150
+n_obs      <- 5
+set.seed(42)
+id_g       <- rep(seq_len(n_subjects), each = n_obs)
+time_g     <- rep(0:(n_obs - 1), times = n_subjects)
+b_g        <- rnorm(n_subjects, sd = sqrt(0.8))
+sigma_eps  <- 1.2
+y_g        <- 2.0 + 0.5 * time_g + b_g[id_g] + rnorm(n_subjects * n_obs, sd = sigma_eps)
+df_gauss   <- data.frame(id = id_g, time = time_g, y = y_g)
+
+fm_gauss <- mixed_model(
+  fixed  = y ~ time,
+  random = ~ 1 | id,
+  data   = df_gauss,
+  family = students.t(df = 1e6),   # numerically identical to Gaussian
+  n_phis = 1
+)
+
+gauss_fixture <- list(
+  betas  = as.numeric(fixef(fm_gauss)),
+  phis   = as.numeric(fm_gauss$phis),   # log(sigma_residual)
+  D      = as.list(as.data.frame(fm_gauss$D)),
+  logLik = as.numeric(logLik(fm_gauss)),
+  bse    = as.numeric(sqrt(diag(vcov(fm_gauss)))),
+  data   = as.list(df_gauss)
+)
+write_json(gauss_fixture, "gaussian_ri.json", digits = 10, auto_unbox = FALSE)
+cat("  Saved gaussian_ri.json\n")
+cat("  betas:", paste(round(gauss_fixture$betas, 4), collapse = ", "), "\n")
+cat("  sigma = exp(phis):", round(exp(fm_gauss$phis), 4), "\n")
+cat("  D[1,1]:", round(fm_gauss$D[1, 1], 4), "\n")
+cat("  logLik:", round(gauss_fixture$logLik, 4), "\n\n")
 
 cat("Done.  All fixtures written to:", getwd(), "\n")

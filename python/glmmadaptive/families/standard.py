@@ -1,10 +1,20 @@
 """
 Standard GLM family objects.
 
-Implements: Binomial, Poisson, NegativeBinomial, Gamma, Beta.
+Implements: Binomial, Poisson, NegativeBinomial, Gamma, Beta, Gaussian,
+StudentsT.
 
 Each mirrors the corresponding R family and its ``log_dens`` / ``score_eta``
 implementations from ``R/Fit_Funs.R`` and ``R/mixed_model.R``.
+
+Notes
+-----
+The R package explicitly rejects ``gaussian()`` and redirects users to
+``lme()`` / ``lmer()``.  The Python port implements :class:`Gaussian` here
+because there is no equivalent Python GLMM package to redirect to, and the
+adaptive Gauss-Hermite quadrature approach works perfectly well for normal
+responses.  For the same reason :class:`StudentsT` (R: ``students.t()``) is
+also fully implemented.
 """
 
 from __future__ import annotations
@@ -14,7 +24,7 @@ from typing import Optional
 import numpy as np
 from numpy.typing import NDArray
 from scipy.special import gammaln, betaln, logit, expit
-from scipy.stats import nbinom
+from scipy.stats import nbinom, norm as sp_norm, t as sp_t
 
 from glmmadaptive.families.base import BaseFamily
 
@@ -437,3 +447,244 @@ class Beta(BaseFamily):
             + (a - 1.0) * np.log(y)
             + (b - 1.0) * np.log(1.0 - y)
         )
+
+
+# ---------------------------------------------------------------------------
+# Gaussian (Normal)
+# ---------------------------------------------------------------------------
+
+class Gaussian(BaseFamily):
+    """
+    Gaussian (normal) family for continuous responses.
+
+    Parameterisation: Y ~ N(η, σ²) where σ = exp(phis[0]).
+    The residual standard deviation σ is estimated on the log scale so that
+    the optimiser works over the unconstrained real line.
+
+    Mirrors the ``students.t()`` R family in the df → ∞ limit.  The R package
+    itself rejects ``gaussian()`` and redirects to ``lme()`` / ``lmer()``, but
+    the Python port implements this family directly via adaptive GHQ.
+
+    Parameters
+    ----------
+    link : str
+        Link function: ``"identity"`` (default), ``"log"``, or ``"inverse"``.
+    """
+
+    family = "gaussian"
+    n_phis = 1
+    has_zi = False
+
+    def __init__(self, link: str = "identity"):
+        if link not in ("identity", "log", "inverse"):
+            raise ValueError(f"Unknown link '{link}' for Gaussian family")
+        self.link = link
+
+    # --- inverse link -------------------------------------------------------
+
+    def linkinv(self, eta: NDArray) -> NDArray:
+        if self.link == "log":
+            return np.exp(eta)
+        if self.link == "inverse":
+            return 1.0 / eta
+        return eta  # identity
+
+    # --- variance ------------------------------------------------------------
+
+    def variance(self, mu: NDArray) -> NDArray:
+        # Constant variance (dispersion carried in phis)
+        return np.ones_like(mu)
+
+    # --- dμ/dη --------------------------------------------------------------
+
+    def mu_eta(self, eta: NDArray) -> NDArray:
+        if self.link == "log":
+            return np.exp(eta)
+        if self.link == "inverse":
+            return -1.0 / (eta ** 2)
+        return np.ones_like(eta)  # identity
+
+    # --- log density --------------------------------------------------------
+
+    def log_dens(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        phis: Optional[NDArray] = None,
+        eta_zi: Optional[NDArray] = None,
+    ) -> NDArray:
+        """
+        log p(y|η, σ) = -½ log(2π) - log σ - ½ (y - μ)² / σ²
+
+        where μ = linkinv(η) and σ = exp(phis[0]).
+        """
+        if phis is None:
+            raise ValueError("Gaussian family requires phis (log residual SD)")
+        sigma = np.exp(phis[0])
+        mu = self.linkinv(eta)
+        return sp_norm.logpdf(y, loc=mu, scale=sigma)
+
+    # --- analytic score ∂log p / ∂η ----------------------------------------
+
+    def score_eta(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        phis: Optional[NDArray] = None,
+        eta_zi: Optional[NDArray] = None,
+    ) -> NDArray:
+        """
+        ∂ log p / ∂η = (y - μ) / σ²  ×  dμ/dη
+        """
+        if phis is None:
+            raise ValueError("Gaussian family requires phis")
+        sigma2 = np.exp(2.0 * phis[0])
+        mu = self.linkinv(eta)
+        return (y - mu) / sigma2 * self.mu_eta(eta)
+
+    # --- analytic score ∂log p / ∂phis[0] -----------------------------------
+
+    def score_phis(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        phis: Optional[NDArray] = None,
+        eta_zi: Optional[NDArray] = None,
+    ) -> Optional[NDArray]:
+        """
+        ∂ log p / ∂ phis[0]  where phis[0] = log σ.
+
+        d/d(log σ) [-log σ - ½(y-μ)²/σ²]  =  (y-μ)²/σ² - 1
+        Summed over all observations.
+        """
+        if phis is None:
+            raise ValueError("Gaussian family requires phis")
+        sigma2 = np.exp(2.0 * phis[0])
+        mu = self.linkinv(eta)
+        return np.array([np.sum((y - mu) ** 2 / sigma2 - 1.0)])
+
+
+# ---------------------------------------------------------------------------
+# StudentsT
+# ---------------------------------------------------------------------------
+
+class StudentsT(BaseFamily):
+    """
+    Location-scale Student's-t family for continuous responses.
+
+    Parameterisation: Y ~ t(η, σ², df) where σ = exp(phis[0]) and df is
+    fixed (not estimated).  As df → ∞ this converges to :class:`Gaussian`.
+
+    Mirrors ``students.t()`` in ``R/Fit_Funs.R``.
+
+    Parameters
+    ----------
+    df : float
+        Degrees of freedom (required; must be positive).
+    link : str
+        Link function: ``"identity"`` (default), ``"log"``, or ``"inverse"``.
+    """
+
+    family = "students_t"
+    n_phis = 1
+    has_zi = False
+
+    def __init__(self, df: float, link: str = "identity"):
+        if df <= 0:
+            raise ValueError("df must be positive")
+        if link not in ("identity", "log", "inverse"):
+            raise ValueError(f"Unknown link '{link}' for StudentsT family")
+        self.df = float(df)
+        self.link = link
+
+    # --- inverse link -------------------------------------------------------
+
+    def linkinv(self, eta: NDArray) -> NDArray:
+        if self.link == "log":
+            return np.exp(eta)
+        if self.link == "inverse":
+            return 1.0 / eta
+        return eta
+
+    # --- variance ------------------------------------------------------------
+
+    def variance(self, mu: NDArray) -> NDArray:
+        return np.ones_like(mu)
+
+    # --- dμ/dη --------------------------------------------------------------
+
+    def mu_eta(self, eta: NDArray) -> NDArray:
+        if self.link == "log":
+            return np.exp(eta)
+        if self.link == "inverse":
+            return -1.0 / (eta ** 2)
+        return np.ones_like(eta)
+
+    # --- log density --------------------------------------------------------
+
+    def log_dens(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        phis: Optional[NDArray] = None,
+        eta_zi: Optional[NDArray] = None,
+    ) -> NDArray:
+        """
+        log p(y|η, σ, df) = log dt((y-μ)/σ, df) - log σ
+
+        Mirrors ``dt(x = (y - eta) / sigma, df = .df, log = TRUE) - log(sigma)``
+        in R's ``students.t`` implementation.
+        """
+        if phis is None:
+            raise ValueError("StudentsT family requires phis (log scale parameter)")
+        sigma = np.exp(phis[0])
+        mu = self.linkinv(eta)
+        return sp_t.logpdf((y - mu) / sigma, df=self.df) - phis[0]
+
+    # --- analytic score ∂log p / ∂η ----------------------------------------
+
+    def score_eta(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        phis: Optional[NDArray] = None,
+        eta_zi: Optional[NDArray] = None,
+    ) -> NDArray:
+        """
+        Mirrors R's ``score_eta_fun`` for ``students.t``:
+            (y-μ) * (df+1) / (df*σ²) / (1 + (y-μ)²/(df*σ²))  ×  dμ/dη
+        """
+        if phis is None:
+            raise ValueError("StudentsT family requires phis")
+        sigma2 = np.exp(2.0 * phis[0])
+        mu = self.linkinv(eta)
+        d = y - mu
+        score_mu = d * (self.df + 1.0) / (self.df * sigma2) / (
+            1.0 + d ** 2 / (self.df * sigma2)
+        )
+        return score_mu * self.mu_eta(eta)
+
+    # --- analytic score ∂log p / ∂phis[0] -----------------------------------
+
+    def score_phis(
+        self,
+        y: NDArray,
+        eta: NDArray,
+        phis: Optional[NDArray] = None,
+        eta_zi: Optional[NDArray] = None,
+    ) -> Optional[NDArray]:
+        """
+        Mirrors R's ``score_phis_fun`` for ``students.t``:
+            (df+1) * (y-μ)²/(df*σ²) / (1 + (y-μ)²/(df*σ²)) - 1
+        summed over observations (chain rule: ∂σ/∂phis[0] = σ, so ×σ/σ = 1
+        after substituting through the identity-link score formula).
+        """
+        if phis is None:
+            raise ValueError("StudentsT family requires phis")
+        sigma2 = np.exp(2.0 * phis[0])
+        mu = self.linkinv(eta)
+        d2_df = (y - mu) ** 2 / self.df
+        score_per_obs = (self.df + 1.0) * d2_df / sigma2 / (
+            1.0 + d2_df / sigma2
+        ) - 1.0
+        return np.array([np.sum(score_per_obs)])
