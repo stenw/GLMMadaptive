@@ -8,11 +8,11 @@ compare against ``students.t(df=1e6)`` which is numerically identical to
 Gaussian but accepted by GLMMadaptive R.
 
 Covered comparisons:
-* fixef (betas)             — rtol=0.05
-* phis  (log sigma)         — rtol=0.05
+* fixef (betas)             — rtol=0.02
+* phis  (log sigma)         — rtol=0.02
 * D[0,0] (RE variance)      — rtol=0.10
 * logLik                    — atol=0.5
-* predict(type="mean_subject") — rtol=0.05
+* predict(type="mean_subject") — rtol=0.02
 * ranef                     — rtol=0.10
 """
 
@@ -93,14 +93,14 @@ class TestGaussianVsR:
     def test_betas_close(self, r_gaussian, py_gaussian):
         assert_allclose(
             py_gaussian.fixef().values, r_gaussian["betas"],
-            rtol=0.05, err_msg="betas differ from R students.t(df=1e6)",
+            rtol=0.02, err_msg="betas differ from R students.t(df=1e6)",
         )
 
     def test_phis_close(self, r_gaussian, py_gaussian):
         """log(sigma) should agree — both parameterise sigma = exp(phis[0])."""
         assert_allclose(
             py_gaussian.phis[0], r_gaussian["phis"][0],
-            rtol=0.05, err_msg="phis[0] = log(sigma) differs from R",
+            rtol=0.02, err_msg="phis[0] = log(sigma) differs from R",
         )
 
     def test_D_close(self, r_gaussian, py_gaussian):
@@ -121,7 +121,7 @@ class TestGaussianVsR:
         )
         assert_allclose(
             py_preds, r_gaussian["predictions_mean_subject"],
-            rtol=0.05, err_msg="mean_subject predictions differ from R",
+            rtol=0.02, err_msg="mean_subject predictions differ from R",
         )
 
     def test_ranef_close(self, r_gaussian, py_gaussian):

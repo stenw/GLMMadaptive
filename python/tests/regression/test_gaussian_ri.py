@@ -56,7 +56,7 @@ class TestGaussianRIvsR:
 
     def test_betas_close(self, fixture, fitted):
         r_betas = np.asarray(fixture["betas"])
-        assert_allclose(fitted.fixef().values, r_betas, rtol=0.05,
+        assert_allclose(fitted.fixef().values, r_betas, rtol=0.02,
                         err_msg="Fixed-effect coefficients differ from R")
 
     def test_sigma_close(self, fixture, fitted):
@@ -84,11 +84,11 @@ class TestGaussianRIvsR:
 
     @pytest.mark.regression
     def test_intercept_close(self, fixture, fitted):
-        assert_allclose(fitted.fixef().values[0], fixture["betas"][0], rtol=0.05)
+        assert_allclose(fitted.fixef().values[0], fixture["betas"][0], rtol=0.02)
 
     @pytest.mark.regression
     def test_time_slope_close(self, fixture, fitted):
-        assert_allclose(fitted.fixef().values[1], fixture["betas"][1], rtol=0.05)
+        assert_allclose(fitted.fixef().values[1], fixture["betas"][1], rtol=0.02)
 
 
 class TestGaussianRISummary:
