@@ -1,0 +1,442 @@
+---
+title: "Methods for MixModResults Objects (Python)"
+author: "Dimitris Rizopoulos"
+date: today
+format:
+  html:
+    toc: true
+    code-fold: false
+jupyter: python3
+---
+
+```{python}
+#| include: false
+import warnings
+warnings.filterwarnings("ignore")
+```
+
+# MixModResults Objects
+
+This vignette illustrates the Python API for models fitted by `MixedModel`
+in **glmmadaptive**, mirroring the R vignette *Methods for MixMod Objects*.
+
+## Implementation status
+
+| R method | Python equivalent | Status |
+|---|---|---|
+| `print()` / `summary()` | `repr(fm)` / `fm.summary()` | **Implemented** |
+| `confint()` fixed effects | `fm.confint()` | **Implemented** |
+| `confint(parm="var-cov")` | — | Not yet implemented |
+| `vcov()` | `fm.vcov()` | **Implemented** |
+| `vcov(sandwich=TRUE)` | — | Not yet implemented |
+| `fixef()` | `fm.fixef()` | **Implemented** |
+| `ranef()` | `fm.ranef()` | **Implemented** |
+| `coef()` (subject-specific) | see note below | Partial |
+| `marginal_coefs()` | — | Not yet implemented |
+| `fitted()` | `fm.fitted()` | **Implemented** |
+| `fitted(type="marginal")` | — | Not yet implemented |
+| `residuals()` | `fm.residuals()` | **Implemented** |
+| `effectPlotData()` | manual (see §6) | Implemented via `predict()` |
+| `effects` package | — | No Python equivalent (see §7) |
+| `anova()` | `MixModResults.anova()` | **Implemented** |
+| `predict()` mean/subject | `fm.predict()` | **Implemented** |
+| `predict(type="marginal")` | — | Not yet implemented |
+| `predict(newdata2=...)` | `fm.predict_dynamic()` | **Implemented** |
+| `simulate()` | — | Not yet implemented |
+
+---
+
+## Data simulation and model fitting
+
+We simulate the same binary longitudinal dataset as in the R vignette:
+100 subjects, 8 measurements each, with random intercepts and random slopes.
+
+```{python}
+import numpy as np
+import pandas as pd
+from scipy.special import expit
+
+rng = np.random.default_rng(1234)
+
+n     = 100   # subjects
+K     = 8     # measurements per subject
+t_max = 15.0  # maximum follow-up time
+
+# Design: baseline at time=0, then K-1 random follow-up times
+times = np.concatenate(
+    [np.concatenate([[0.0], np.sort(rng.uniform(0, t_max, K - 1))])
+     for _ in range(n)]
+)
+ids  = np.repeat(np.arange(n), K)
+sex  = np.repeat(np.tile(["male", "female"], n // 2), K)  # alternating
+
+DF = pd.DataFrame({"id": ids, "time": times, "sex": sex})
+
+# True parameters
+betas_true = np.array([-2.13, -0.25, 0.24, -0.05])  # intercept, sexfemale, time, sex:time
+D11, D22   = 0.48, 0.10   # RE variances
+
+# Simulate random effects
+b0 = rng.normal(0, np.sqrt(D11), n)
+b1 = rng.normal(0, np.sqrt(D22), n)
+
+# Fixed-effects design matrix  (intercept, sex_female, time, sex_female:time)
+sex_f = (DF["sex"] == "female").astype(float).values
+X_sim = np.column_stack([
+    np.ones(n * K),
+    sex_f,
+    DF["time"].values,
+    sex_f * DF["time"].values,
+])
+Z_sim = np.column_stack([np.ones(n * K), DF["time"].values])
+
+eta = X_sim @ betas_true + (Z_sim * np.column_stack([b0[ids], b1[ids]])).sum(1)
+DF["y"] = rng.binomial(1, expit(eta))
+
+print(DF.head(10))
+print(f"\nEvent rate: {DF.y.mean():.3f}")
+```
+
+```{python}
+from glmmadaptive import MixedModel
+from glmmadaptive.families import Binomial
+from glmmadaptive.results import MixModResults
+
+fm = MixedModel(
+    fixed  = "y ~ sex * time",
+    random = "~ time | id",
+    data   = DF,
+    family = Binomial(),
+    control = {"iter_em": 50, "verbose": False},
+).fit()
+```
+
+---
+
+## Detailed output, confidence intervals, and covariance matrix
+
+### print and summary
+
+`repr(fm)` gives a one-line summary; `fm.summary()` gives full output:
+
+```{python}
+print(repr(fm))
+```
+
+```{python}
+print(fm.summary())
+```
+
+Fixed-effects coefficients are on the log-odds scale; exponentiate for
+odds ratios.
+
+### Confidence intervals
+
+Wald confidence intervals for the fixed-effects coefficients:
+
+```{python}
+ci = fm.confint(level=0.95)
+print("95% CIs (log-odds scale):")
+print(ci)
+print("\n95% CIs (odds-ratio scale):")
+print(np.exp(ci))
+```
+
+```{python}
+# 90% CIs
+print("90% CIs:")
+print(fm.confint(level=0.90))
+```
+
+> **Note:** Confidence intervals for variance components
+> (`parm="var-cov"` in R) are not yet implemented in Python.
+> As a workaround, bootstrap confidence intervals can be computed manually.
+
+### Variance-covariance matrix of the MLEs
+
+```{python}
+vcov_mat = fm.vcov()
+print("Vcov (fixed effects):")
+print(np.round(vcov_mat, 6))
+```
+
+> **Note:** Robust (sandwich) standard errors (`vcov(sandwich=TRUE)` in R)
+> are not yet implemented.
+
+---
+
+## Fixed and random effects estimates
+
+```{python}
+print("Fixed effects:")
+print(fm.fixef())
+```
+
+```{python}
+print("Random effects (first 6 subjects):")
+print(fm.ranef().head(6))
+```
+
+> **Note:** In R, `coef(fm)` returns subject-specific coefficients
+> (fixed effects + random effects per subject).  In Python, `fm.coef()` is
+> currently an alias for `fm.fixef()` (fixed effects only).
+> Subject-specific intercepts and slopes can be assembled manually:
+
+```{python}
+re = fm.ranef()                      # shape (n_groups, q)
+fe = fm.fixef().values               # shape (p,)
+
+# Subject-specific intercepts: beta_0 + b_{i,0}
+# Subject-specific time slopes: beta_time + b_{i,1}
+coef_subj = pd.DataFrame({
+    "(Intercept)": fe[0] + re.iloc[:, 0],
+    "time":        fe[2] + re.iloc[:, 1],   # time is the 3rd beta
+}, index=re.index)
+print(coef_subj.head(6))
+```
+
+---
+
+## Marginalized coefficients
+
+> **Not yet implemented.**  In R, `marginal_coefs(fm)` uses a Monte Carlo
+> procedure (Hedeker et al., 2018) to compute population-averaged log-odds
+> ratios from a conditional mixed model.
+>
+> A Python implementation is planned.  In the meantime, the marginal odds
+> ratio for a covariate $x$ can be approximated via numerical integration:
+>
+> $$\beta^{\text{marg}} \approx \beta \cdot \Phi\left(\frac{1}{\sqrt{1 + c^2 \sigma^2_b}}\right)$$
+>
+> where $c = 16\sqrt{3}/(15\pi)$ for the logistic link and $\sigma^2_b$ is the
+> random-intercept variance.
+
+---
+
+## Fitted values and residuals
+
+```{python}
+# Mean-subject fitted values (fixed effects only, b_i = 0)
+fit_ms = fm.fitted(type_="mean_subject")
+print("Mean-subject fitted values (first 8):", np.round(fit_ms[:8], 4))
+```
+
+```{python}
+# Subject-specific fitted values (using empirical Bayes REs)
+fit_ss = fm.fitted(type_="subject_specific")
+print("Subject-specific fitted values (first 8):", np.round(fit_ss[:8], 4))
+```
+
+```{python}
+# Residuals
+resid_ms = fm.residuals(type_="mean_subject")
+resid_ss = fm.residuals(type_="subject_specific")
+print(f"Mean residual (mean-subject):    {resid_ms.mean():.4f}")
+print(f"Mean residual (subject-specific):{resid_ss.mean():.4f}")
+```
+
+> **Note:** `fitted(type="marginal")` (using marginalized coefficients) is
+> not yet implemented.
+
+---
+
+## Effect plots
+
+`effectPlotData()` from the R package computes predictions and pointwise
+confidence intervals on a covariate grid.  In Python we replicate this
+directly using `predict()` and the delta method for standard errors.
+
+```{python}
+import matplotlib.pyplot as plt
+import itertools
+
+# Grid: 25 time points × 2 sex groups
+times_grid = np.linspace(DF["time"].min(), DF["time"].max(), 25)
+nDF = pd.DataFrame(
+    list(itertools.product(times_grid, ["male", "female"])),
+    columns=["time", "sex"],
+)
+# Dummy id (new subjects — mean-subject predictions ignore id)
+nDF["id"] = "new"
+
+# Point predictions (mean-subject = fixed effects only)
+pred_ms = fm.predict(newdata=nDF, type_="mean_subject")
+
+# Delta-method standard errors on the linear predictor scale
+import patsy
+_, X_new = patsy.dmatrices(fm.fixed_formula, nDF, return_type="matrix")
+X_new = np.asarray(X_new)
+vcov_beta = fm.vcov()          # covariance of fixed effects
+se_eta = np.sqrt(np.einsum("ij,jk,ik->i", X_new, vcov_beta, X_new))
+eta_new = X_new @ fm.fixef().values
+
+# 95% CIs transformed to probability scale
+ci_lo = expit(eta_new - 1.96 * se_eta)
+ci_hi = expit(eta_new + 1.96 * se_eta)
+
+nDF["pred"] = pred_ms
+nDF["low"]  = ci_lo
+nDF["upp"]  = ci_hi
+```
+
+```{python}
+#| fig-cap: "Estimated longitudinal probability curves with 95% pointwise CIs"
+fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+
+for ax, grp in zip(axes, ["male", "female"]):
+    sub = nDF[nDF["sex"] == grp]
+    ax.plot(sub["time"], sub["pred"], color="red", lw=2, label="Predicted")
+    ax.fill_between(sub["time"], sub["low"], sub["upp"],
+                    color="grey", alpha=0.3, label="95% CI")
+    ax.set_title(grp)
+    ax.set_xlabel("Follow-up time")
+    ax.set_ylabel("Subject-specific probability")
+    ax.set_ylim(0, 1)
+    ax.legend(fontsize=8)
+
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+#| fig-cap: "Effect plots on the log-odds scale"
+fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+
+for ax, grp in zip(axes, ["male", "female"]):
+    sub = nDF[nDF["sex"] == grp]
+    eta_sub  = (X_new @ fm.fixef().values)[nDF["sex"].values == grp]
+    se_sub   = se_eta[nDF["sex"].values == grp]
+    t_sub    = sub["time"].values
+    ax.plot(t_sub, eta_sub, color="red", lw=2, label="Log-odds")
+    ax.fill_between(t_sub, eta_sub - 1.96*se_sub, eta_sub + 1.96*se_sub,
+                    color="grey", alpha=0.3, label="95% CI")
+    ax.set_title(grp)
+    ax.set_xlabel("Follow-up time")
+    ax.set_ylabel("Log-odds")
+    ax.legend(fontsize=8)
+
+plt.tight_layout()
+plt.show()
+```
+
+---
+
+## Effect plots using the effects package
+
+> **R only.**  The R **effects** package provides `predictorEffect("time", fm)`
+> which produces effect plots with automatic covariate marginalisation.
+> There is no direct Python equivalent.
+>
+> The closest alternatives in Python are:
+>
+> - The [`marginaleffects`](https://marginaleffects.com/) project provides
+>   average marginal effects for many model types; GLMM support via
+>   **glmmadaptive** is not yet available.
+> - `statsmodels` provides marginal effects for GLMs but not for GLMMs.
+> - The manual `predict()`-on-a-grid approach shown in §6 above covers most
+>   practical use cases.
+
+---
+
+## Comparing two models
+
+The `anova()` static method performs a likelihood ratio test between two
+nested models.  Here we test whether the correlation between random
+intercepts and slopes can be dropped:
+
+```{python}
+# Uncorrelated random effects: diagonal D
+# (patsy formula with || for uncorrelated: use separate ~ 1 | id and ~ 0 + time | id)
+# Approximated here by fixing D to diagonal via a simpler random structure:
+gm = MixedModel(
+    fixed  = "y ~ sex * time",
+    random = "~ 1 | id",        # random intercept only
+    data   = DF,
+    family = Binomial(),
+    control = {"iter_em": 50, "verbose": False},
+).fit()
+
+print(MixModResults.anova(gm, fm))
+```
+
+The test shows whether adding a correlated random slope for time
+significantly improves the fit.
+
+---
+
+## Predictions for new subjects
+
+We extract the first four observations of subject 1 and treat this as a
+new patient:
+
+```{python}
+pred_DF = DF[DF["id"] == 0].head(4).copy()
+pred_DF["id"] = "N1"
+print(pred_DF[["id", "time", "sex", "y"]])
+```
+
+### Mean-subject predictions
+
+Fixed-effects only; corresponds to a subject with random effects = 0:
+
+```{python}
+preds_ms = fm.predict(newdata=pred_DF, type_="mean_subject")
+print("Mean-subject predictions:")
+print(pd.DataFrame({"time": pred_DF["time"].values,
+                    "pred": np.round(preds_ms, 4)}))
+```
+
+### Subject-specific predictions
+
+Uses the empirical Bayes random effects estimated from the subject's own
+response history:
+
+```{python}
+preds_ss = fm.predict(newdata=pred_DF, type_="subject_specific")
+print("Subject-specific predictions:")
+print(pd.DataFrame({"time": pred_DF["time"].values,
+                    "pred": np.round(preds_ss, 4)}))
+```
+
+> **Note:** `predict(type="marginal")` (population-averaged via
+> marginalized coefficients) is not yet implemented.
+
+### Dynamic predictions for future time points
+
+Predictions at future times, conditioned on the subject's observed history,
+use `predict_dynamic()` (mirrors R's `predict(newdata2=...)` argument):
+
+```{python}
+future_times = pred_DF[["id", "time", "sex"]].iloc[:3].copy()
+future_times["time"] = [3.0, 4.0, 10.0]
+print("Future time points:")
+print(future_times)
+```
+
+```{python}
+dyn_preds = fm.predict_dynamic(
+    newdata  = pred_DF,
+    newdata2 = future_times,
+)
+print("\nDynamic predictions at future times:")
+print(pd.DataFrame({
+    "time": future_times["time"].values,
+    "pred": np.round(dyn_preds["predictions"], 4),
+}))
+```
+
+---
+
+## Simulate
+
+> **Not yet implemented.**  In R, `simulate(fm, nsim=2, seed=123)` draws
+> replicate response vectors from the fitted model.  The simulation
+> proceeds by:
+>
+> 1. Drawing random effects $b_i \sim N(0, \hat{D})$ for each subject.
+> 2. Computing the linear predictor $\eta_i = X_i\hat{\beta} + Z_i b_i$.
+> 3. Drawing $y_i \sim F(\text{linkinv}(\eta_i))$ from the response family.
+>
+> A `simulate()` method is planned for a future release.  Until then, the
+> three-step procedure above can be executed manually using `fm.fixef()`,
+> `fm.D`, and the family's `linkinv()`.
