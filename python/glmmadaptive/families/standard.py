@@ -117,6 +117,18 @@ class Binomial(BaseFamily):
         # Standard binary log-likelihood
         return y * np.log(mu) + (1.0 - y) * np.log(1.0 - mu)
 
+    # --- forward link g(μ) → η -----------------------------------------------
+
+    def link_fun(self, mu: NDArray) -> NDArray:
+        mu = np.clip(mu, 1e-15, 1.0 - 1e-15)
+        if self.link == "logit":
+            return logit(mu)
+        if self.link == "probit":
+            from scipy.stats import norm
+            return norm.ppf(mu)
+        # cloglog: η = log(-log(1-μ))
+        return np.log(-np.log1p(-mu))
+
     # --- analytic score ∂log p / ∂η -----------------------------------------
 
     def score_eta(
@@ -133,6 +145,12 @@ class Binomial(BaseFamily):
             return y - mu
         dmu_deta = self.mu_eta(eta)
         return (y - mu) / self.variance(mu) * dmu_deta
+
+    # --- simulate response ---------------------------------------------------
+
+    def simulate_response(self, mu, phis, eta_zi, rng):
+        mu = np.clip(mu, 1e-15, 1.0 - 1e-15)
+        return rng.binomial(1, mu).astype(float)
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +217,18 @@ class Poisson(BaseFamily):
             return y - mu
         dmu = self.mu_eta(eta)
         return (y - mu) / mu * dmu
+
+    def link_fun(self, mu: NDArray) -> NDArray:
+        mu = np.maximum(mu, 1e-15)
+        if self.link == "log":
+            return np.log(mu)
+        if self.link == "sqrt":
+            return np.sqrt(mu)
+        return mu  # identity
+
+    def simulate_response(self, mu, phis, eta_zi, rng):
+        mu = np.maximum(mu, 1e-15)
+        return rng.poisson(mu).astype(float)
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +342,16 @@ class NegativeBinomial(BaseFamily):
         # ∂θ/∂phis[0] = theta (since theta = exp(phis[0]))
         return np.array([np.sum(d_log_p_d_theta * theta)])
 
+    def link_fun(self, mu: NDArray) -> NDArray:
+        return np.log(np.maximum(mu, 1e-15))
+
+    def simulate_response(self, mu, phis, eta_zi, rng):
+        mu = np.maximum(mu, 1e-15)
+        theta = self._get_theta(phis)
+        # NB2: size=theta, p = theta/(theta+mu)
+        p = theta / (theta + mu)
+        return rng.negative_binomial(theta, p).astype(float)
+
 
 # ---------------------------------------------------------------------------
 # Gamma
@@ -379,6 +419,22 @@ class Gamma(BaseFamily):
             - alpha * y / mu
             - gammaln(alpha)
         )
+
+    def link_fun(self, mu: NDArray) -> NDArray:
+        mu = np.maximum(mu, 1e-15)
+        if self.link == "log":
+            return np.log(mu)
+        if self.link == "inverse":
+            return 1.0 / mu
+        return mu  # identity
+
+    def simulate_response(self, mu, phis, eta_zi, rng):
+        if phis is None:
+            raise ValueError("Gamma requires phis")
+        alpha = np.exp(phis[0])
+        mu = np.maximum(mu, 1e-15)
+        # Gamma(shape=alpha, scale=mu/alpha)
+        return rng.gamma(alpha, mu / alpha)
 
 
 # ---------------------------------------------------------------------------
@@ -563,6 +619,20 @@ class Gaussian(BaseFamily):
         mu = self.linkinv(eta)
         return np.array([np.sum((y - mu) ** 2 / sigma2 - 1.0)])
 
+    def link_fun(self, mu: NDArray) -> NDArray:
+        mu = np.asarray(mu, dtype=float)
+        if self.link == "log":
+            return np.log(np.maximum(mu, 1e-15))
+        if self.link == "inverse":
+            return 1.0 / mu
+        return mu  # identity
+
+    def simulate_response(self, mu, phis, eta_zi, rng):
+        if phis is None:
+            raise ValueError("Gaussian requires phis")
+        sigma = np.exp(phis[0])
+        return rng.normal(mu, sigma)
+
 
 # ---------------------------------------------------------------------------
 # StudentsT
@@ -688,3 +758,17 @@ class StudentsT(BaseFamily):
             1.0 + d2_df / sigma2
         ) - 1.0
         return np.array([np.sum(score_per_obs)])
+
+    def link_fun(self, mu: NDArray) -> NDArray:
+        mu = np.asarray(mu, dtype=float)
+        if self.link == "log":
+            return np.log(np.maximum(mu, 1e-15))
+        if self.link == "inverse":
+            return 1.0 / mu
+        return mu  # identity
+
+    def simulate_response(self, mu, phis, eta_zi, rng):
+        if phis is None:
+            raise ValueError("StudentsT requires phis")
+        sigma = np.exp(phis[0])
+        return sp_t.rvs(df=self.df, loc=mu, scale=sigma, random_state=rng)

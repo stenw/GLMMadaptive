@@ -136,5 +136,52 @@ class BaseFamily(ABC):
         """μ̂ = linkinv(η) (alias for linkinv)."""
         return self.linkinv(eta)
 
+    def link_fun(self, mu: NDArray) -> NDArray:
+        """
+        Forward link g(μ) → η.
+
+        Used by ``marginal_coefs()`` to back-transform averaged predictions.
+        Default: numerical inverse via bisection.  Override for efficiency.
+        """
+        from scipy.optimize import brentq
+        result = np.empty_like(mu, dtype=float)
+        for idx in np.ndindex(mu.shape):
+            m = float(mu[idx])
+            try:
+                result[idx] = brentq(lambda eta: float(self.linkinv(np.array([eta]))) - m,
+                                     -500, 500, xtol=1e-10)
+            except ValueError:
+                result[idx] = np.nan
+        return result
+
+    def simulate_response(
+        self,
+        mu: NDArray,
+        phis: Optional[NDArray],
+        eta_zi: Optional[NDArray],
+        rng: "np.random.Generator",  # noqa: F821
+    ) -> NDArray:
+        """
+        Draw one simulated response vector from the fitted distribution.
+
+        Parameters
+        ----------
+        mu : ndarray of shape (n,)
+            Fitted mean E[Y | b].
+        phis : ndarray or None
+            Dispersion parameters (log-scale).
+        eta_zi : ndarray or None
+            Linear predictor for the zero-inflation component.
+        rng : np.random.Generator
+            NumPy random generator for reproducibility.
+
+        Returns
+        -------
+        ndarray of shape (n,)
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__}.simulate_response() is not implemented"
+        )
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(link='{self.link}')"

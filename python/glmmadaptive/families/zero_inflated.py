@@ -129,6 +129,17 @@ class ZIPoisson(BaseFamily):
         # y>0: -π
         return np.where(y == 0, zi0_score, -pi)
 
+    def link_fun(self, mu: NDArray) -> NDArray:
+        return np.log(np.maximum(mu, 1e-15))
+
+    def simulate_response(self, mu, phis, eta_zi, rng):
+        mu = np.maximum(mu, 1e-15)
+        counts = rng.poisson(mu).astype(float)
+        if eta_zi is not None:
+            extra_zeros = rng.binomial(1, expit(eta_zi)).astype(bool)
+            counts[extra_zeros] = 0.0
+        return counts
+
 
 # ---------------------------------------------------------------------------
 # Zero-inflated Negative Binomial
@@ -288,6 +299,19 @@ class ZINegativeBinomial(BaseFamily):
 
         # Chain rule: d/d phis[0] = d/d θ · θ  (θ = exp(phis[0]))
         return np.array([float(np.sum(d_log_p_d_theta * theta))])
+
+    def link_fun(self, mu: NDArray) -> NDArray:
+        return np.log(np.maximum(mu, 1e-15))
+
+    def simulate_response(self, mu, phis, eta_zi, rng):
+        mu = np.maximum(mu, 1e-15)
+        theta = self._get_theta(phis)
+        p = theta / (theta + mu)
+        counts = rng.negative_binomial(theta, p).astype(float)
+        if eta_zi is not None:
+            extra_zeros = rng.binomial(1, expit(eta_zi)).astype(bool)
+            counts[extra_zeros] = 0.0
+        return counts
 
 
 # ---------------------------------------------------------------------------

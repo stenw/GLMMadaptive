@@ -456,3 +456,157 @@ def score_gammas(
                 score += post_w[k] * (X_zi_i.T @ s_zi)
 
     return score
+
+
+# ---------------------------------------------------------------------------
+# Per-group score contributions  (used for sandwich estimator)
+# ---------------------------------------------------------------------------
+
+def score_contributions(
+    betas: NDArray,
+    D: NDArray,
+    phis: Optional[NDArray],
+    gammas: Optional[NDArray],
+    family: BaseFamily,
+    X_list: list[NDArray],
+    Z_list: list[NDArray],
+    y_list: list[NDArray],
+    gh: "GHQuadrature",  # noqa: F821
+    diagonal_D: bool = False,
+    X_zi_list: Optional[list[NDArray]] = None,
+    Z_zi_list: Optional[list[Optional[NDArray]]] = None,
+) -> NDArray:
+    """
+    Per-group score contribution matrix for the sandwich estimator.
+
+    Returns an ``(n_groups, n_params)`` matrix ``S`` where row ``i`` is the
+    score contribution of group ``i`` w.r.t. the full parameter vector
+    ``θ = [betas | D_chol | phis | gammas]``.
+
+    The sandwich meat is then ``S.T @ S``.
+
+    Mirrors ``score_mixed(i_contributions=TRUE)`` in ``R/Fit_Funs.R``.
+    """
+    from glmmadaptive.utils.linalg import cov_to_chol
+    from glmmadaptive.utils.numdiff import cd_grad
+
+    n_groups = len(X_list)
+    n_betas = len(betas)
+    n_re = D.shape[0]
+    n_D = n_re if diagonal_D else n_re * (n_re + 1) // 2
+    n_phis = len(phis) if phis is not None else 0
+    n_gammas = len(gammas) if gammas is not None else 0
+    n_params = n_betas + n_D + n_phis + n_gammas
+
+    S = np.zeros((n_groups, n_params))
+
+    _, log_det_D = np.linalg.slogdet(D)
+    D_inv = np.linalg.inv(D)
+
+    # Pre-compute Cholesky representation of D for gradient
+    D_chol = cov_to_chol(D, diagonal=diagonal_D)  # (n_D,)
+
+    for i in range(n_groups):
+        X_i = X_list[i]
+        Z_i = Z_list[i]
+        y_i = y_list[i]
+        ncz = Z_i.shape[1]
+        X_zi_i = X_zi_list[i] if X_zi_list is not None else None
+        Z_zi_i = Z_zi_list[i] if Z_zi_list is not None else None
+
+        b_nodes = gh.b_nodes[i]
+        log_w = gh.log_weights[i]
+        n_pts = b_nodes.shape[0]
+
+        log_unnorm = np.empty(n_pts)
+        eta_pts = []
+        eta_zi_pts = []
+
+        for k in range(n_pts):
+            b_k = b_nodes[k]
+            eta_k = X_i @ betas + Z_i @ b_k[:ncz]
+            eta_zi_k = _make_eta_zi(b_k, ncz, X_zi_i, Z_zi_i, gammas)
+            eta_pts.append(eta_k)
+            eta_zi_pts.append(eta_zi_k)
+            log_py_b = np.sum(family.log_dens(y_i, eta_k, phis=phis, eta_zi=eta_zi_k))
+            from glmmadaptive.utils.linalg import log_dmvnorm
+            log_pb = log_dmvnorm(b_k, cov_inv=D_inv, log_det_cov=log_det_D)
+            log_unnorm[k] = log_py_b + log_pb + log_w[k]
+
+        post_w = np.exp(log_unnorm - logsumexp(log_unnorm))
+
+        s_i = np.zeros(n_params)
+
+        # --- score w.r.t. betas ---
+        for k in range(n_pts):
+            eta_k = eta_pts[k]
+            eta_zi_k = eta_zi_pts[k]
+            s_eta = family.score_eta(y_i, eta_k, phis=phis, eta_zi=eta_zi_k)
+            if s_eta is None:
+                _b_k = b_nodes[k]
+                s_eta_full = cd_grad(
+                    lambda bb: np.sum(
+                        family.log_dens(y_i, X_i @ bb + Z_i @ _b_k[:ncz],
+                                        phis=phis, eta_zi=eta_zi_k)
+                    ),
+                    betas,
+                )
+                s_i[:n_betas] += post_w[k] * s_eta_full
+            else:
+                s_i[:n_betas] += post_w[k] * (X_i.T @ s_eta)
+
+        # --- score w.r.t. D (via Cholesky parameterisation, numerical diff) ---
+        def _ll_group_D(d_chol):
+            from glmmadaptive.utils.linalg import chol_to_cov, log_dmvnorm as _ldmvn
+            D_ = chol_to_cov(d_chol, q=n_re, diagonal=diagonal_D)
+            _, log_det_ = np.linalg.slogdet(D_)
+            D_inv_ = np.linalg.inv(D_)
+            log_u = np.empty(n_pts)
+            for k_ in range(n_pts):
+                b_k_ = b_nodes[k_]
+                eta_k_ = eta_pts[k_]
+                eta_zi_k_ = eta_zi_pts[k_]
+                log_py_ = np.sum(family.log_dens(y_i, eta_k_, phis=phis, eta_zi=eta_zi_k_))
+                log_pb_ = _ldmvn(b_k_, cov_inv=D_inv_, log_det_cov=log_det_)
+                log_u[k_] = log_py_ + log_pb_ + log_w[k_]
+            return logsumexp(log_u)
+
+        s_D = cd_grad(_ll_group_D, D_chol)
+        s_i[n_betas:n_betas + n_D] = s_D
+
+        # --- score w.r.t. phis ---
+        if n_phis > 0:
+            for k in range(n_pts):
+                eta_k = eta_pts[k]
+                eta_zi_k = eta_zi_pts[k]
+                s_p = family.score_phis(y_i, eta_k, phis=phis, eta_zi=eta_zi_k)
+                if s_p is None:
+                    _eta_k = eta_k
+                    _eta_zi_k = eta_zi_k
+                    s_p = cd_grad(
+                        lambda ph: np.sum(
+                            family.log_dens(y_i, _eta_k, phis=ph, eta_zi=_eta_zi_k)
+                        ),
+                        phis,
+                    )
+                s_i[n_betas + n_D:n_betas + n_D + n_phis] += post_w[k] * s_p
+
+        # --- score w.r.t. gammas ---
+        if n_gammas > 0:
+            for k in range(n_pts):
+                eta_k = eta_pts[k]
+                eta_zi_k = eta_zi_pts[k]
+                _b_k = b_nodes[k]
+                s_zi = family.score_eta_zi(y_i, eta_k, phis=phis, eta_zi=eta_zi_k)
+                if s_zi is None:
+                    def _f_g(g, _b=_b_k, _e=eta_k):
+                        _ezi = _make_eta_zi(_b, ncz, X_zi_i, Z_zi_i, g)
+                        return np.sum(family.log_dens(y_i, _e, phis=phis, eta_zi=_ezi))
+                    s_zi_grad = cd_grad(_f_g, gammas)
+                    s_i[n_betas + n_D + n_phis:] += post_w[k] * s_zi_grad
+                else:
+                    s_i[n_betas + n_D + n_phis:] += post_w[k] * (X_zi_i.T @ s_zi)
+
+        S[i] = s_i
+
+    return S
