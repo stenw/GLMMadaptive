@@ -40,6 +40,7 @@ from glmmadaptive.core.fit_funs import (
     score_D,
     score_phis,
     score_gammas,
+    score_contributions,
     _pack_params,
     _unpack_params,
 )
@@ -418,6 +419,18 @@ def mixed_fit(
     except Exception:
         H = np.eye(len(theta_final)) * 1e6
 
+    # Per-group score contributions for sandwich estimator
+    try:
+        S = score_contributions(
+            betas, D, phis, gammas, family,
+            X_list, Z_list, y_list, gh_final,
+            diagonal_D=diagonal_D,
+            X_zi_list=X_zi_list,
+            Z_zi_list=Z_zi_list,
+        )
+    except Exception:
+        S = None
+
     return {
         "betas": betas,
         "D": D,
@@ -425,6 +438,7 @@ def mixed_fit(
         "gammas": gammas,
         "logLik": ll_final,
         "Hessian": H,
+        "score_contributions": S,
         "post_modes": modes,
         "post_neg_hessians": neg_hess,
         "converged": converged,

@@ -63,6 +63,9 @@ class MixModResults:
         self.gammas = fit_result.get("gammas", None)
         self._gamma_names = self._get_gamma_names() if self.gammas is not None else []
 
+        # Per-group score contributions (for sandwich estimator)
+        self._score_contributions = fit_result.get("score_contributions", None)
+
         # Extract parameter names from model design matrices
         self._beta_names = self._get_beta_names()
 
@@ -101,14 +104,27 @@ class MixModResults:
     @property
     def _vcov_betas(self) -> NDArray:
         """Covariance matrix of β̂ (from inverse Hessian, betas block)."""
-        n_p = len(self.params)
-        H_betas = self._Hessian[:n_p, :n_p]
-        try:
-            return np.linalg.inv(H_betas)
-        except np.linalg.LinAlgError:
-            return np.diag(1.0 / np.diag(H_betas))
+        return self.vcov(parm="fixed-effects")
 
-    def vcov(self, parm: str = "fixed-effects") -> NDArray:
+    def _param_slices(self) -> dict:
+        """
+        Return a dict mapping parameter block names to (start, stop) index
+        slices in the full parameter vector θ = [betas | D_chol | phis | gammas].
+        """
+        n_b = len(self.params)
+        n_re = self.D.shape[0]
+        diagonal_D = self.model.control.get("diagonal_D", False)
+        n_D = n_re if diagonal_D else n_re * (n_re + 1) // 2
+        n_phi = len(self.phis) if self.phis is not None else 0
+        n_gam = len(self.gammas) if self.gammas is not None else 0
+        return {
+            "fixed-effects": (0, n_b),
+            "var-cov": (n_b, n_b + n_D),
+            "extra": (n_b + n_D, n_b + n_D + n_phi),
+            "zero_part": (n_b + n_D + n_phi, n_b + n_D + n_phi + n_gam),
+        }
+
+    def vcov(self, parm: str = "fixed-effects", sandwich: bool = False) -> NDArray:
         """
         Variance-covariance matrix.
 
@@ -116,17 +132,41 @@ class MixModResults:
         ----------
         parm : str
             ``"fixed-effects"`` (default), ``"all"``, ``"var-cov"``,
-            or ``"extra"`` (phis).
+            ``"extra"`` (phis), or ``"zero_part"`` (gammas).
+        sandwich : bool
+            If True, return the sandwich (robust) estimator
+            H^{-1} (∑_i sᵢ sᵢᵀ) H^{-1}.  Requires per-group score
+            contributions stored at fit time.
 
         Returns
         -------
         ndarray
         """
-        if parm == "fixed-effects":
-            return self._vcov_betas
+        V = np.linalg.inv(self._Hessian)
+        if sandwich:
+            S = getattr(self, "_score_contributions", None)
+            if S is None:
+                raise RuntimeError(
+                    "Sandwich estimator requires per-group score contributions. "
+                    "Re-fit the model (score contributions are stored automatically)."
+                )
+            meat = S.T @ S
+            V = V @ meat @ V
+
         if parm == "all":
-            return np.linalg.inv(self._Hessian)
-        raise ValueError(f"Unknown parm='{parm}'")
+            return V
+        slices = self._param_slices()
+        if parm not in slices:
+            raise ValueError(
+                f"Unknown parm='{parm}'. "
+                f"Choose from: {list(slices.keys()) + ['all']}"
+            )
+        s, e = slices[parm]
+        if e <= s:
+            raise ValueError(
+                f"Model has no '{parm}' parameters."
+            )
+        return V[s:e, s:e]
 
     @property
     def bse(self) -> NDArray:
@@ -169,32 +209,114 @@ class MixModResults:
     # Confidence intervals  (mirrors confint.MixMod in R)
     # ------------------------------------------------------------------
 
-    def confint(self, level: float = 0.95, parm: str = "fixed-effects") -> pd.DataFrame:
+    def confint(
+        self,
+        level: float = 0.95,
+        parm: str = "fixed-effects",
+        sandwich: bool = False,
+    ) -> pd.DataFrame:
         """
-        Wald confidence intervals for fixed-effects coefficients.
+        Wald confidence intervals.
 
         Parameters
         ----------
         level : float
             Confidence level (default 0.95).
         parm : str
-            Currently only ``"fixed-effects"`` supported.
+            ``"fixed-effects"`` (default), ``"var-cov"`` (variance components),
+            ``"extra"`` (dispersion phis), ``"zero_part"`` (ZI gammas).
+        sandwich : bool
+            If True, use sandwich standard errors.
 
         Returns
         -------
-        DataFrame with columns ``["2.5 %", "97.5 %"]`` (or adjusted for level).
+        DataFrame with columns ``["2.5 %", "Estimate", "97.5 %"]``
+        (percentages adjusted for level).
         """
-        if parm != "fixed-effects":
-            raise NotImplementedError(f"confint for parm='{parm}' not yet implemented")
+        from glmmadaptive.utils.linalg import cov_to_chol, chol_to_cov
         alpha = 1.0 - level
         z = _norm.ppf(1.0 - alpha / 2.0)
-        lo = self.params - z * self.bse
-        hi = self.params + z * self.bse
         lo_pct = f"{100 * alpha / 2:.1f} %"
         hi_pct = f"{100 * (1 - alpha / 2):.1f} %"
-        return pd.DataFrame(
-            {lo_pct: lo, hi_pct: hi},
-            index=self._beta_names,
+
+        if parm == "fixed-effects":
+            V_block = self.vcov(parm="fixed-effects", sandwich=sandwich)
+            ses = np.sqrt(np.maximum(np.diag(V_block), 0.0))
+            lo = self.params - z * ses
+            hi = self.params + z * ses
+            return pd.DataFrame(
+                {lo_pct: lo, "Estimate": self.params, hi_pct: hi},
+                index=self._beta_names,
+            )
+
+        if parm == "var-cov":
+            diagonal_D = self.model.control.get("diagonal_D", False)
+            D = self.D
+            V_block = self.vcov(parm="var-cov", sandwich=sandwich)
+            ses = np.sqrt(np.maximum(np.diag(V_block), 0.0))
+            if diagonal_D or D.shape[0] == 1:
+                # Unconstrained: log(diag(D)); CI → exponentiate
+                unconstr = np.log(np.diag(D))
+                lo_u = unconstr - z * ses
+                hi_u = unconstr + z * ses
+                lo_v = np.exp(lo_u)
+                hi_v = np.exp(hi_u)
+                est_v = np.exp(unconstr)
+                n_re = D.shape[0]
+                row_names = [f"var.b{j}" for j in range(n_re)]
+            else:
+                # Full D: Cholesky parameterisation
+                unconstr = cov_to_chol(D, diagonal=False)
+                lo_u = unconstr - z * ses
+                hi_u = unconstr + z * ses
+                # back-transform each endpoint
+                n_re = D.shape[0]
+                def _chol_diag(v):
+                    M = chol_to_cov(v, q=n_re, diagonal=False)
+                    idx = np.tril_indices(n_re)
+                    return M[idx]
+                lo_v = _chol_diag(lo_u)
+                hi_v = _chol_diag(hi_u)
+                est_v = _chol_diag(unconstr)
+                idx = np.tril_indices(n_re)
+                row_names = [
+                    f"var.b{i}" if i == j else f"cov.b{j}_b{i}"
+                    for i, j in zip(idx[0], idx[1])
+                ]
+            return pd.DataFrame(
+                {lo_pct: lo_v, "Estimate": est_v, hi_pct: hi_v},
+                index=row_names,
+            )
+
+        if parm == "extra":
+            if self.phis is None:
+                raise ValueError("Model has no extra (phis) parameters.")
+            V_block = self.vcov(parm="extra", sandwich=sandwich)
+            ses = np.sqrt(np.maximum(np.diag(V_block), 0.0))
+            lo = self.phis - z * ses
+            hi = self.phis + z * ses
+            row_names = [f"phi_{i}" for i in range(len(self.phis))]
+            return pd.DataFrame(
+                {lo_pct: lo, "Estimate": self.phis, hi_pct: hi},
+                index=row_names,
+            )
+
+        if parm == "zero_part":
+            if self.gammas is None:
+                raise ValueError("Model has no zero-part (gammas) parameters.")
+            V_block = self.vcov(parm="zero_part", sandwich=sandwich)
+            ses = np.sqrt(np.maximum(np.diag(V_block), 0.0))
+            lo = self.gammas - z * ses
+            hi = self.gammas + z * ses
+            return pd.DataFrame(
+                {lo_pct: lo, "Estimate": self.gammas, hi_pct: hi},
+                index=self._gamma_names if self._gamma_names else
+                      [f"gamma_{i}" for i in range(len(self.gammas))],
+            )
+
+        raise ValueError(
+            f"Unknown parm='{parm}'. Choose from: "
+            "'fixed-effects', 'var-cov', 'extra', 'zero_part'."
         )
 
     # Alias
@@ -232,6 +354,7 @@ class MixModResults:
         self,
         newdata: Optional[pd.DataFrame] = None,
         type_: str = "mean_subject",
+        **marginal_kwargs,
     ) -> NDArray:
         """
         Compute predictions.
@@ -243,11 +366,27 @@ class MixModResults:
         type_ : str
             ``"mean_subject"`` — fixed effects only (population mean subject).
             ``"subject_specific"`` — add empirical Bayes random effects.
+            ``"marginal"`` — population-averaged via ``marginal_coefs()``.
+        **marginal_kwargs
+            Passed to :meth:`marginal_coefs` when ``type_="marginal"``.
 
         Returns
         -------
         ndarray of shape (N,) — predicted means μ̂.
         """
+        if type_ == "marginal":
+            betas_marg = self.marginal_coefs(**marginal_kwargs)["betas"]
+            if newdata is None:
+                X = self.model._X
+            else:
+                import patsy
+                _, X = patsy.dmatrices(
+                    self.model.fixed_formula, newdata, return_type="matrix"
+                )
+                X = np.asarray(X)
+            eta = X @ betas_marg
+            return self.family.linkinv(eta)
+
         if newdata is None:
             X = self.model._X
             groups = self.model._groups
@@ -534,13 +673,277 @@ class MixModResults:
     # Fitted values and residuals
     # ------------------------------------------------------------------
 
-    def fitted(self, type_: str = "mean_subject") -> NDArray:
+    def fitted(self, type_: str = "mean_subject", **kwargs) -> NDArray:
         """Fitted values on the training data."""
-        return self.predict(type_=type_)
+        return self.predict(type_=type_, **kwargs)
 
     def residuals(self, type_: str = "mean_subject") -> NDArray:
         """Raw residuals: y - ŷ."""
         return self.model._y - self.fitted(type_=type_)
+
+    # ------------------------------------------------------------------
+    # simulate  (mirrors simulate.MixMod in R)
+    # ------------------------------------------------------------------
+
+    def simulate(
+        self,
+        nsim: int = 1,
+        seed: Optional[int] = None,
+        type_: str = "subject_specific",
+        new_RE: bool = False,
+        acount_MLEs_var: bool = False,
+    ) -> pd.DataFrame:
+        """
+        Simulate response data from the fitted model.
+
+        Parameters
+        ----------
+        nsim : int
+            Number of simulated datasets to generate.
+        seed : int, optional
+            Random seed for reproducibility.
+        type_ : str
+            ``"subject_specific"`` (default) — uses empirical Bayes random
+            effects; ``"mean_subject"`` — sets all random effects to zero.
+        new_RE : bool
+            If True, draw new random effects from N(0, D) instead of using
+            the empirical Bayes estimates.
+        acount_MLEs_var : bool
+            If True, sample model parameters from MVN(θ̂, V) for each
+            simulation, propagating MLE uncertainty.
+
+        Returns
+        -------
+        DataFrame of shape (n_obs, nsim) with simulated responses.
+        """
+        rng = np.random.default_rng(seed)
+
+        X = self.model._X                    # (N, p)
+        Z = self.model._Z                    # (N, q)
+        groups = self.model._groups          # (N,) integer group indices
+        n_groups = self.model._n_groups
+        n_re_count = self.model._n_re_count  # q for count part
+
+        X_zi = self.model._X_zi              # (N, g) or None
+        Z_zi = self.model._Z_zi              # (N, qz) or None
+
+        betas_fit = self.params.copy()
+        phis_fit = self.phis.copy() if self.phis is not None else None
+        gammas_fit = self.gammas.copy() if self.gammas is not None else None
+        D_fit = self.D.copy()
+
+        if acount_MLEs_var:
+            from glmmadaptive.utils.linalg import cov_to_chol, chol_to_cov
+            V_full = np.linalg.inv(self._Hessian)
+
+        # empirical Bayes b (n_groups, q_total)
+        b_bayes = self._post_modes  # shape (n_groups, q_total)
+
+        out = np.empty((len(self.model._y), nsim))
+
+        for s in range(nsim):
+            betas = betas_fit
+            phis = phis_fit
+            gammas = gammas_fit
+            D = D_fit
+
+            if acount_MLEs_var:
+                # sample θ_new ~ MVN(θ̂, V)
+                n_betas = len(betas_fit)
+                n_re = self.D.shape[0]
+                diagonal_D = self.model.control.get("diagonal_D", False)
+                n_D = n_re if diagonal_D else n_re * (n_re + 1) // 2
+                n_phis = len(phis_fit) if phis_fit is not None else 0
+                n_gammas = len(gammas_fit) if gammas_fit is not None else 0
+                n_total = n_betas + n_D + n_phis + n_gammas
+                V_use = V_full[:n_total, :n_total]
+                theta_hat = np.concatenate([
+                    betas_fit,
+                    cov_to_chol(D_fit, diagonal=diagonal_D),
+                ] + ([phis_fit] if phis_fit is not None else [])
+                  + ([gammas_fit] if gammas_fit is not None else []))
+                theta_new = rng.multivariate_normal(theta_hat, V_use)
+                betas = theta_new[:n_betas]
+                idx = n_betas
+                D_raw = theta_new[idx:idx + n_D]
+                D = chol_to_cov(D_raw, q=n_re, diagonal=diagonal_D)
+                idx += n_D
+                if n_phis > 0:
+                    phis = theta_new[idx:idx + n_phis]
+                    idx += n_phis
+                if n_gammas > 0:
+                    gammas = theta_new[idx:idx + n_gammas]
+
+            # draw random effects
+            if new_RE:
+                b_sim = rng.multivariate_normal(np.zeros(D.shape[0]),
+                                                D, size=n_groups)
+            else:
+                b_sim = b_bayes  # (n_groups, q_total)
+
+            if type_ == "mean_subject":
+                b_sim = np.zeros_like(b_sim)
+
+            # count-part linear predictor
+            eta = X @ betas
+            for i in range(n_groups):
+                mask = groups == i
+                eta[mask] += Z[mask] @ b_sim[i, :n_re_count]
+
+            mu = self.family.linkinv(eta)
+
+            # zero-inflation linear predictor
+            eta_zi_arr = None
+            if X_zi is not None and gammas is not None:
+                eta_zi_arr = X_zi @ gammas
+                if Z_zi is not None:
+                    n_re_zi = Z_zi.shape[1]
+                    for i in range(n_groups):
+                        mask = groups == i
+                        eta_zi_arr[mask] += Z_zi[mask] @ b_sim[i, n_re_count:n_re_count + n_re_zi]
+
+            out[:, s] = self.family.simulate_response(mu, phis, eta_zi_arr, rng)
+
+        return pd.DataFrame(out, columns=[f"sim_{s+1}" for s in range(nsim)])
+
+    # ------------------------------------------------------------------
+    # marginal_coefs  (mirrors marginal_coefs.MixMod in R)
+    # ------------------------------------------------------------------
+
+    def marginal_coefs(
+        self,
+        std_errors: bool = False,
+        M: int = 3000,
+        K: int = 100,
+        seed: int = 1,
+    ) -> dict:
+        """
+        Population-averaged (marginal) coefficients via Monte Carlo integration.
+
+        Follows the Hedeker et al. (2017) approach: for each subject sample
+        M random-effect vectors from N(0, D), compute the average inverse-link
+        response, back-transform with the forward link, then solve for the
+        marginal regression coefficients by OLS.
+
+        Parameters
+        ----------
+        std_errors : bool
+            If True, compute SEs by repeating with K perturbed parameter draws
+            from MVN(θ̂, V).
+        M : int
+            Number of random-effect samples per subject per iteration (default 3000).
+        K : int
+            Number of parameter perturbation iterations for SEs (default 100).
+        seed : int
+            Random seed (default 1).
+
+        Returns
+        -------
+        dict with keys:
+            ``"betas"`` — ndarray of marginal coefficients,
+            ``"coef_table"`` — DataFrame (if std_errors=True),
+            ``"vcov"`` — ndarray (if std_errors=True).
+        """
+        from scipy.linalg import eigh
+
+        X = self.model._X           # (N, p)
+        Z = self.model._Z           # (N, q_count)
+        groups = self.model._groups
+        n_groups = self.model._n_groups
+        n_re_count = self.model._n_re_count
+        X_zi = self.model._X_zi
+        Z_zi = self.model._Z_zi
+
+        def _compute_marg_betas(betas, D, gammas, seed_offset):
+            rng_mc = np.random.default_rng(seed + seed_offset)
+            # Cholesky-based sampling from N(0, D)
+            try:
+                evals, evecs = eigh(D)
+                sqrtD = evecs @ np.diag(np.sqrt(np.maximum(evals, 0.0)))
+            except Exception:
+                sqrtD = np.eye(D.shape[0])
+
+            Xbetas = X @ betas
+            if gammas is not None and X_zi is not None:
+                eta_zi_fixed = X_zi @ gammas
+            else:
+                eta_zi_fixed = None
+
+            marg_link = np.empty(len(Xbetas))
+            id_ = groups  # integer group labels 0..n_groups-1
+            n_re = D.shape[0]
+
+            for i in range(n_groups):
+                mask = id_ == i
+                # sample M random effects: (n_re, M)
+                b_mc = sqrtD @ rng_mc.standard_normal((n_re, M))
+                # count-part linear predictor (n_obs_i x M)
+                Zb = Z[mask, :] @ b_mc[:n_re_count, :]  # (n_obs_i, M)
+                mu_mc = self.family.linkinv(Xbetas[mask, np.newaxis] + Zb)  # (n_obs_i, M)
+
+                if eta_zi_fixed is not None:
+                    eta_zi_i = eta_zi_fixed[mask]  # (n_obs_i,)
+                    if Z_zi is not None:
+                        n_re_zi = Z_zi.shape[1]
+                        Zb_zi = Z_zi[mask, :] @ b_mc[n_re_count:n_re_count + n_re_zi, :]
+                        from scipy.special import expit as _expit
+                        pi_mc = _expit(eta_zi_i[:, np.newaxis] + Zb_zi)
+                    else:
+                        from scipy.special import expit as _expit
+                        pi_mc = _expit(eta_zi_i[:, np.newaxis])
+                    mu_mc = (1.0 - pi_mc) * mu_mc
+
+                # average over M samples → marg_mu, then apply forward link
+                marg_mu_i = mu_mc.mean(axis=1)  # (n_obs_i,)
+                marg_link[mask] = self.family.link_fun(marg_mu_i)
+
+            # OLS: β_marg = (X'X)^{-1} X' marg_link
+            betas_marg, _, _, _ = np.linalg.lstsq(X, marg_link, rcond=None)
+            return betas_marg
+
+        betas_marg = _compute_marg_betas(self.params, self.D, self.gammas, 0)
+        out = {"betas": betas_marg}
+
+        if std_errors:
+            from glmmadaptive.utils.linalg import cov_to_chol, chol_to_cov
+            diagonal_D = self.model.control.get("diagonal_D", False)
+            n_betas = len(self.params)
+            n_re = self.D.shape[0]
+            n_D = n_re if diagonal_D else n_re * (n_re + 1) // 2
+            n_phis = len(self.phis) if self.phis is not None else 0
+            n_gammas = len(self.gammas) if self.gammas is not None else 0
+            n_total = n_betas + n_D + n_phis + n_gammas
+            V = np.linalg.inv(self._Hessian)[:n_total, :n_total]
+            theta_hat = np.concatenate([
+                self.params,
+                cov_to_chol(self.D, diagonal=diagonal_D),
+            ] + ([self.phis] if self.phis is not None else [])
+              + ([self.gammas] if self.gammas is not None else []))
+            rng_se = np.random.default_rng(seed + 1000)
+            mc_betas = np.empty((K, n_betas))
+            for k in range(K):
+                theta_k = rng_se.multivariate_normal(theta_hat, V)
+                betas_k = theta_k[:n_betas]
+                D_raw_k = theta_k[n_betas:n_betas + n_D]
+                D_k = chol_to_cov(D_raw_k, q=n_re, diagonal=diagonal_D)
+                idx = n_betas + n_D
+                gammas_k = theta_k[idx:idx + n_gammas] if n_gammas > 0 else None
+                mc_betas[k] = _compute_marg_betas(betas_k, D_k, gammas_k, k + 1)
+            vcov_marg = np.cov(mc_betas.T)
+            ses = np.sqrt(np.diag(vcov_marg))
+            z_vals = betas_marg / np.where(ses > 0, ses, np.nan)
+            from scipy.stats import norm as sp_norm_
+            p_vals = 2.0 * sp_norm_.sf(np.abs(z_vals))
+            coef_table = pd.DataFrame({
+                "Estimate": betas_marg,
+                "Std.Err": ses,
+                "z-value": z_vals,
+                "p-value": p_vals,
+            }, index=self._beta_names)
+            out["vcov"] = vcov_marg
+            out["coef_table"] = coef_table
+
+        return out
 
     # ------------------------------------------------------------------
     # Likelihood ratio test  (mirrors anova.MixMod in R)

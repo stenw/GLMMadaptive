@@ -23,6 +23,9 @@ dev = [
     "pytest-cov",
     "rpy2>=3.5",       # live R comparison tests
 ]
+marginaleffects = [
+    "marginaleffects>=0.5",
+]
 # Future: JAX support for automatic differentiation.
 # See docs/jax_roadmap.md for the planned migration path.
 # jax = ["jax>=0.4", "jaxlib>=0.4"]

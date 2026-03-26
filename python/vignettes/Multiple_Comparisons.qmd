@@ -1,0 +1,227 @@
+---
+title: "Multiple Comparisons for Mixed Models"
+format:
+  html:
+    toc: true
+    code-fold: false
+jupyter: python3
+---
+
+# Multiple Comparisons with Mixed Models
+
+This vignette mirrors the R *Multiple Comparisons* vignette for `GLMMadaptive`.  The R
+version uses the **multcomp** and **emmeans** packages.  Here we use the Python
+**marginaleffects** package together with the `glmmadaptive.marginaleffects` adapter.
+
+The adapter wraps a fitted `MixModResults` object so that the full `marginaleffects` API
+— `predictions()`, `comparisons()`, `hypotheses()`, `slopes()` — works out of the box.
+Predictions are **mean-subject** (population-level fixed effects only), which is the
+appropriate quantity for marginal inference.
+
+> **Installation note**: the adapter requires the optional dependency:
+> ```
+> pip install marginaleffects
+> ```
+> or, if installing from source:
+> ```
+> pip install "glmmadaptive[marginaleffects]"
+> ```
+
+## Setup
+
+```{python}
+import numpy as np
+import pandas as pd
+
+from glmmadaptive import MixedModel
+from glmmadaptive.families import Binomial
+from glmmadaptive.marginaleffects import wrap_mixmod
+
+from marginaleffects import predictions, comparisons, hypotheses, datagrid
+```
+
+---
+
+## 1  Additive model — pairwise time comparisons
+
+### 1.1  Simulate data
+
+We simulate a binary longitudinal outcome for 300 subjects measured at 4 time points,
+with main effects of `sex` and `time`.  This matches the R vignette setup.
+
+```{python}
+np.random.seed(1234)
+n = 300   # subjects
+K = 4     # measurements per subject
+
+ids  = np.repeat(np.arange(n), K)
+time = pd.Categorical(
+    np.tile([f"Time{k}" for k in range(1, K + 1)], n),
+    categories=[f"Time{k}" for k in range(1, K + 1)],
+)
+sex = pd.Categorical(
+    np.repeat(np.where(np.arange(n) < n // 2, "male", "female"), K),
+    categories=["male", "female"],
+)
+
+df = pd.DataFrame({"id": ids, "time": time, "sex": sex})
+
+# Fixed-effects design matrix (intercept + sex + 3 time dummies)
+X = pd.get_dummies(df[["sex", "time"]], drop_first=True).astype(float)
+X.insert(0, "Intercept", 1.0)
+
+# True betas (intercept, sex=female, Time2, Time3, Time4)
+betas_true = np.array([-2.13, 1.0, 1.2, -1.2, 1.2])
+b = np.random.normal(0, 1, n)[ids]        # random intercepts
+eta = X.values @ betas_true + b
+df["y"] = np.random.binomial(1, 1.0 / (1.0 + np.exp(-eta)))
+
+print(df.head(8))
+print(f"\nEvent rate: {df['y'].mean():.3f}")
+```
+
+### 1.2  Fit additive model
+
+```{python}
+fm = MixedModel(
+    "y ~ sex + time",
+    random="~ 1 | id",
+    data=df,
+    family=Binomial(),
+).fit()
+
+print(fm.summary())
+```
+
+### 1.3  Wrap for marginaleffects
+
+```{python}
+mfm = wrap_mixmod(fm)
+```
+
+### 1.4  Pairwise time contrasts on the log-odds scale
+
+In R the vignette uses `multcomp::glht(fm, linfct = mcp(time = "Tukey"))`, which tests
+all 6 pairwise log-odds differences between the 4 time levels.  In Python we use
+`hypotheses()` with explicit contrast strings.  The parameters (0-indexed) are:
+
+- `b0` — Intercept
+- `b1` — `sex[T.female]`
+- `b2` — `time[T.Time2]` (vs. Time1 reference)
+- `b3` — `time[T.Time3]`
+- `b4` — `time[T.Time4]`
+
+```{python}
+pairwise_time = hypotheses(mfm, hypothesis=[
+    "b2 = 0",        # Time2 vs Time1
+    "b3 = 0",        # Time3 vs Time1
+    "b4 = 0",        # Time4 vs Time1
+    "b2 - b3 = 0",   # Time2 vs Time3
+    "b2 - b4 = 0",   # Time2 vs Time4
+    "b3 - b4 = 0",   # Time3 vs Time4
+])
+
+print(pairwise_time)
+```
+
+Estimates are log-odds differences; the z-statistics and p-values are based on the normal
+approximation (Wald test), equivalent to `multcomp` with `test = adjusted("none")`.
+
+### 1.5  Predictions on a time grid
+
+```{python}
+time_grid = datagrid(
+    model=mfm,
+    time=["Time1", "Time2", "Time3", "Time4"],
+)
+p_time = predictions(mfm, newdata=time_grid)
+print(p_time.select(["time", "estimate", "conf_low", "conf_high"]))
+```
+
+---
+
+## 2  Interaction model — estimated marginal means
+
+### 2.1  Fit model with sex × time interaction
+
+```{python}
+gm = MixedModel(
+    "y ~ sex * time",
+    random="~ 1 | id",
+    data=df,
+    family=Binomial(),
+).fit()
+
+print(gm.summary())
+```
+
+### 2.2  Estimated marginal means for sex × time
+
+In R the vignette uses `emmeans(gm, ~ sex | time)`.  In Python we build a prediction
+grid explicitly and call `predictions()`:
+
+```{python}
+mgm = wrap_mixmod(gm)
+
+sex_time_grid = datagrid(
+    model=mgm,
+    sex=["male", "female"],
+    time=["Time1", "Time2", "Time3", "Time4"],
+)
+
+emm = predictions(mgm, newdata=sex_time_grid)
+print(emm.select(["sex", "time", "estimate", "conf_low", "conf_high"]))
+```
+
+Each row is the model-predicted probability (with 95 % CI) for that sex–time cell,
+averaged over random effects (mean-subject / population-averaged prediction).
+
+### 2.3  Pairwise sex comparisons within each time point
+
+In R the vignette uses `pairs(gm_mc)`.  The Python equivalent uses `comparisons()` with
+`by="time"`, computing differences on the grid:
+
+```{python}
+cmp_sex = comparisons(
+    mgm,
+    variables={"sex": "pairwise"},
+    by="time",
+    newdata=sex_time_grid,
+)
+print(cmp_sex.select(["contrast", "time", "estimate", "std_error", "p_value",
+                       "conf_low", "conf_high"]))
+```
+
+Each row gives the female − male difference in predicted probability at one time point,
+with a delta-method standard error.
+
+---
+
+## 3  Notes on differences from the R vignette
+
+| Feature | R | Python |
+|---------|---|--------|
+| Pairwise log-odds tests | `multcomp::glht` + Tukey MVN correction | `hypotheses()` + Wald normal approximation |
+| Estimated marginal means | `emmeans(gm, ~ sex \| time)` | `datagrid()` + `predictions()` |
+| Pairwise response-scale comparisons | `pairs()` | `comparisons(by=...)` on a grid |
+| Sandwich SEs | `vcov. = vcov(fm, sandwich=TRUE)` | `wrap_mixmod(fit, vcov="sandwich")` |
+| Prediction type | Subject-specific or marginal | Mean-subject only |
+
+### Using sandwich standard errors
+
+To use robust (sandwich) standard errors, pass `vcov="sandwich"` to `wrap_mixmod()`.
+This requires the model to have been fitted with score contributions available
+(planned feature — see the *Methods* vignette):
+
+```python
+# mfm_rob = wrap_mixmod(fm, vcov="sandwich")
+# hypotheses(mfm_rob, hypothesis=["b2 = 0", ...])
+```
+
+### Subject-specific predictions
+
+`marginaleffects` propagates uncertainty via the delta method applied to the
+fixed-effect coefficient vector.  Subject-specific predictions (which add empirical Bayes
+random effects) cannot be supported in this framework because they require group
+membership information that `marginaleffects` does not pass through.  Use
+`fit.predict(type_="subject_specific")` directly for those.
