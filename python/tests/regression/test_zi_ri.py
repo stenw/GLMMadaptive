@@ -112,6 +112,30 @@ class TestZIPoissonRI:
         assert np.all(result.bse > 0)
 
 
+    def test_gamma_se_correct_hessian_block(self, ref):
+        """SE in summary table must match vcov(zero_part), not D_chol block."""
+        data = pd.DataFrame(ref["data"])
+        result = _fit_zip(data)
+        # vcov(zero_part) uses _param_slices() — known correct
+        vcov_g = result.vcov(parm="zero_part")
+        se_expected = np.sqrt(np.diag(vcov_g))
+        # confint routes through vcov() too; cross-check via confint
+        ci = result.confint(parm="zero_part", level=0.95)
+        se_ci = (ci.iloc[:, 2].values - ci.iloc[:, 0].values) / (2 * 1.96)
+        assert_allclose(se_ci, se_expected, rtol=1e-3)
+        # The bug was: vcov_g used [n_betas : n_betas+n_g] which is the D block.
+        # Verify the correct SE differs from the wrong block's SE.
+        n_b = len(result.params)
+        n_g = len(result.gammas)
+        vcov_all = np.linalg.inv(result._Hessian)
+        se_wrong = np.sqrt(np.maximum(np.diag(vcov_all[n_b : n_b + n_g, n_b : n_b + n_g]), 0.0))
+        # They must NOT be the same (D_chol variance ≠ gamma variance)
+        assert not np.allclose(se_wrong, se_expected, rtol=1e-3), (
+            "Bug not triggered: wrong-block SEs match correct SEs — "
+            "model may have no D params between betas and gammas."
+        )
+
+
     def test_df_model_includes_gammas(self, ref):
         """df_model must count zero-part (gamma) parameters."""
         data = pd.DataFrame(ref["data"])
@@ -202,6 +226,25 @@ class TestZINegBinomRI:
         data = pd.DataFrame(ref["data"])
         result = _fit_zinb(data)
         assert result.converged
+
+
+    def test_gamma_se_correct_hessian_block(self, ref):
+        """SE in summary table must match vcov(zero_part), not D_chol/phis block."""
+        data = pd.DataFrame(ref["data"])
+        result = _fit_zinb(data)
+        vcov_g = result.vcov(parm="zero_part")
+        se_expected = np.sqrt(np.diag(vcov_g))
+        ci = result.confint(parm="zero_part", level=0.95)
+        se_ci = (ci.iloc[:, 2].values - ci.iloc[:, 0].values) / (2 * 1.96)
+        assert_allclose(se_ci, se_expected, rtol=1e-3)
+        # Verify the correct block differs from the wrong one (n_betas offset, not full offset)
+        n_b = len(result.params)
+        n_g = len(result.gammas)
+        vcov_all = np.linalg.inv(result._Hessian)
+        se_wrong = np.sqrt(np.maximum(np.diag(vcov_all[n_b : n_b + n_g, n_b : n_b + n_g]), 0.0))
+        assert not np.allclose(se_wrong, se_expected, rtol=1e-3), (
+            "Bug not triggered: wrong-block SEs match correct SEs."
+        )
 
 
     def test_df_model_includes_gammas(self, ref):

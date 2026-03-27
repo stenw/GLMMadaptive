@@ -1041,11 +1041,9 @@ class MixModSummary:
         r = self.results
         if r.gammas is None:
             return None
-        n_p = len(r.params)
         n_g = len(r.gammas)
         try:
-            vcov_all = np.linalg.inv(r._Hessian)
-            vcov_g = vcov_all[n_p : n_p + n_g, n_p : n_p + n_g]
+            vcov_g = r.vcov(parm="zero_part")
             se_g = np.sqrt(np.maximum(np.diag(vcov_g), 0.0))
         except Exception:
             se_g = np.full(n_g, np.nan)
