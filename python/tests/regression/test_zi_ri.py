@@ -111,7 +111,28 @@ class TestZIPoissonRI:
         result = _fit_zip(data)
         assert np.all(result.bse > 0)
 
-    
+
+    def test_df_model_includes_gammas(self, ref):
+        """df_model must count zero-part (gamma) parameters."""
+        data = pd.DataFrame(ref["data"])
+        result = _fit_zip(data)
+        q = result.D.shape[0]
+        n_D = q  # diagonal by default
+        n_phis = len(result.phis) if result.phis is not None else 0
+        n_gammas = len(result.gammas) if result.gammas is not None else 0
+        assert n_gammas > 0, "ZI model should have gamma parameters"
+        expected = len(result.params) + n_D + n_phis + n_gammas
+        assert result.df_model == expected
+
+
+    def test_aic_uses_correct_df(self, ref):
+        """AIC = -2*logLik + 2*df_model (with gammas counted)."""
+        data = pd.DataFrame(ref["data"])
+        result = _fit_zip(data)
+        expected_aic = -2.0 * result.logLik + 2.0 * result.df_model
+        assert result.aic == pytest.approx(expected_aic)
+
+
     def test_anova_zip_with_zi_random(self, ref):
         """LRT between ZIP (no ZI RE) and ZIP with ZI random intercept."""
         from glmmadaptive import MixedModel
@@ -176,8 +197,29 @@ class TestZINegBinomRI:
         py_theta = float(np.exp(result.phis[0]))
         assert_allclose(py_theta, r_theta, rtol=0.15)
 
-    
+
     def test_converged(self, ref):
         data = pd.DataFrame(ref["data"])
         result = _fit_zinb(data)
         assert result.converged
+
+
+    def test_df_model_includes_gammas(self, ref):
+        """df_model must count zero-part (gamma) parameters."""
+        data = pd.DataFrame(ref["data"])
+        result = _fit_zinb(data)
+        q = result.D.shape[0]
+        n_D = q  # diagonal by default
+        n_phis = len(result.phis) if result.phis is not None else 0
+        n_gammas = len(result.gammas) if result.gammas is not None else 0
+        assert n_gammas > 0, "ZI model should have gamma parameters"
+        expected = len(result.params) + n_D + n_phis + n_gammas
+        assert result.df_model == expected
+
+
+    def test_aic_uses_correct_df(self, ref):
+        """AIC = -2*logLik + 2*df_model (with gammas counted)."""
+        data = pd.DataFrame(ref["data"])
+        result = _fit_zinb(data)
+        expected_aic = -2.0 * result.logLik + 2.0 * result.df_model
+        assert result.aic == pytest.approx(expected_aic)
