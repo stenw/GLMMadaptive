@@ -53,7 +53,8 @@ Stubs / TODO
 * Zero-inflated families (``ZIPoisson``, ``ZINegativeBinomial``, ``ZIBinomial``)
 * Hurdle families (``HurdlePoisson``, ``HurdleNegativeBinomial``,
   ``HurdleBeta``, ``HurdleLogNormal``)
-* Ordinal / continuation-ratio models
+* Ordinal / continuation-ratio models — ``cr_setup`` / ``cr_marg_probs`` helpers
+  implemented; full ``effectPlotData`` marginalisation pending
 * Censored-normal, Student-t, unit-Lindley, COM-Poisson families
 * ``marginal_coefs`` (Hedeker et al. 2017 marginalisation)
 * ``cooks_distance`` (leave-one-group-out diagnostics)
@@ -71,6 +72,7 @@ from glmmadaptive.core.mixed_model import MixedModel  # noqa: F401
 from glmmadaptive.results.mixmod_results import MixModResults  # noqa: F401
 from glmmadaptive.results.scoring import scoring_rules  # noqa: F401
 from glmmadaptive import families  # noqa: F401
+from glmmadaptive.ordinal import cr_setup, cr_marg_probs  # noqa: F401
 
 __version__ = "0.1.0"
-__all__ = ["MixedModel", "MixModResults", "scoring_rules", "families"]
+__all__ = ["MixedModel", "MixModResults", "scoring_rules", "families", "cr_setup", "cr_marg_probs"]
