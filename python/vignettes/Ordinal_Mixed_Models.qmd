@@ -1,0 +1,374 @@
+---
+title: "Mixed Models for Ordinal Data"
+format:
+  html:
+    toc: true
+    embed-resources: true
+    code-fold: false
+jupyter: python3
+---
+
+## Continuation Ratio Model
+
+### Definition
+
+In many applications the outcome of interest is an **ordinal variable**: a
+categorical variable with a natural ordering of its levels.  Examples include
+pain severity (none, mild, moderate, severe) or economic status (low, medium,
+high).  A variety of models exist for ordinal outcomes; here we focus on the
+**continuation ratio (CR) model**.
+
+Let $y_{ij}$ denote the $j$-th measurement on subject $i$, taking values in
+the ordered set $\{0, 1, \ldots, K\}$.  The **forward** CR mixed model
+postulates:
+
+$$
+\log\!\left\{
+  \frac{\Pr(y_{ij} = k \mid y_{ij} \geq k)}{1 - \Pr(y_{ij} = k \mid y_{ij} \geq k)}
+\right\}
+= \alpha_k + x_{ij}^\top\beta + z_{ij}^\top b_i,
+$$
+
+while the **backward** formulation conditions on $y_{ij} \leq k$:
+
+$$
+\log\!\left\{
+  \frac{\Pr(y_{ij} = k \mid y_{ij} \leq k)}{1 - \Pr(y_{ij} = k \mid y_{ij} \leq k)}
+\right\}
+= \alpha_k + x_{ij}^\top\beta + z_{ij}^\top b_i.
+$$
+
+The $\alpha_k$ are category-specific threshold parameters; $\beta$ are fixed
+effects; $b_i \sim \mathcal{N}(0, D)$ are subject-specific random effects.
+The design matrix for the fixed effects **does not** include an intercept
+because the $K$ thresholds $\alpha_k$ serve that role.
+
+**When to use each formulation:**
+
+- *Forward*: subjects "pass through" lower categories before reaching higher
+  ones — analogous to a discrete-time survival model.
+- *Backward*: interest lies in the odds of severe vs. less severe outcomes
+  (e.g., disease stage).
+
+### Marginal Probabilities
+
+Given the CR linear predictors
+$\eta_k = \alpha_k + x^\top\beta + z^\top b$,
+the marginal category probabilities under the **forward** formulation are:
+
+$$
+\Pr(y = k) =
+\begin{cases}
+\sigma(\eta_0) & k = 0, \\
+\sigma(\eta_k) \prod_{k' < k} [1 - \sigma(\eta_{k'})] & k > 0\ (k < K), \\
+1 - \sum_{k'=0}^{K-1} \Pr(y = k') & k = K,
+\end{cases}
+$$
+
+where $\sigma(\cdot)$ is the logistic function.  The backward formula is
+analogous with the product running over $k' > k$.
+
+### Estimation via Standard Binomial GLMM
+
+A key advantage of the CR model is that its likelihood can be **re-expressed
+as a standard binomial mixed model** on an expanded dataset.  The
+`cr_setup()` helper performs this expansion:
+
+1. Each observation with ordinal value $k$ is replicated into
+   $\min(k+1, K)$ pseudo-observations (forward) or $K - \max(k-1, 0)$
+   pseudo-observations (backward).
+2. A binary outcome `y_new` encodes the conditional CR event for each
+   pseudo-observation.
+3. A `cohort` factor records which CR comparison each pseudo-observation
+   belongs to.
+
+The expanded data are then fitted with `MixedModel(..., family=Binomial())` —
+no new family class is needed.
+
+---
+
+## An Example
+
+### Setup
+
+```{python}
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.special import expit   # logistic function σ(x) = 1/(1+exp(-x))
+
+from glmmadaptive import MixedModel, MixModResults, cr_setup, cr_marg_probs
+from glmmadaptive.families import Binomial
+```
+
+### Simulating Ordinal Longitudinal Data
+
+We simulate $n = 300$ subjects each with $K = 8$ measurements under the
+**forward** CR model.  The ordinal outcome has 4 levels (categories 0–3,
+labelled "none", "mild", "moderate", "severe").
+
+```{python}
+rng = np.random.default_rng(1234)
+
+n     = 300   # number of subjects
+K_obs = 8     # measurements per subject
+t_max = 15    # maximum follow-up time
+
+# Design: baseline + random follow-up times
+ids  = np.repeat(np.arange(n), K_obs)
+time = np.concatenate([
+    np.concatenate([[0], np.sort(rng.uniform(0, t_max, K_obs - 1))])
+    for _ in range(n)
+])
+sex_subj = rng.choice(["male", "female"], size=n)
+sex      = np.repeat(sex_subj, K_obs)
+
+df = pd.DataFrame({"id": ids, "time": time, "sex": sex})
+
+# Fixed-effects design matrix (no intercept — thresholds play that role)
+# X = [sex_female, time, sex_female * time]
+sex_female = (df["sex"] == "female").astype(float).values
+X = np.column_stack([sex_female, df["time"].values, sex_female * df["time"].values])
+
+# Random-effects design matrix [intercept, time]
+Z = np.column_stack([np.ones(len(df)), df["time"].values])
+
+# True parameters
+thrs  = np.array([-1.5, 0.0, 0.9])      # K-1 = 3 thresholds
+betas = np.array([-0.25, 0.24, -0.05])  # fixed effects
+D11, D22 = 0.48, 0.10                   # random-effects variances
+
+# Simulate random effects b_i ~ N(0, D)
+b = np.column_stack([
+    rng.normal(0, np.sqrt(D11), n),
+    rng.normal(0, np.sqrt(D22), n),
+])
+
+# Linear predictor (common part, without thresholds)
+eta_common = X @ betas + (Z * b[ids]).sum(axis=1)
+
+# Expand into a (n_obs, 3) eta matrix — one column per CR cohort
+eta_matrix = eta_common[:, None] + thrs[None, :]    # shape (n_total, 3)
+
+# Marginal category probabilities under the forward CR model
+mprobs = cr_marg_probs(eta_matrix, direction="forward")  # shape (n_total, 4)
+
+# Sample ordinal outcomes
+y_codes = np.array([rng.choice(4, p=row) for row in mprobs])
+cat_labels = ["none", "mild", "moderate", "severe"]
+df["y"] = pd.Categorical.from_codes(y_codes, categories=cat_labels)
+
+print(df.head(10))
+print("\nCategory counts:\n", df["y"].value_counts().sort_index())
+```
+
+### Data Preparation
+
+Before fitting, `cr_setup()` expands the dataset into pseudo-observations:
+
+```{python}
+cr_vals = cr_setup(df["y"], direction="forward")
+
+# Replicate the covariate rows to match the expanded data
+cr_data = df.iloc[cr_vals["subs"]].copy().reset_index(drop=True)
+cr_data["y_new"]  = cr_vals["y"]       # binary outcome
+cr_data["cohort"] = cr_vals["cohort"]  # CR cohort factor
+
+print(f"Original rows: {len(df)},  expanded rows: {len(cr_data)}")
+print(f"\nCohort distribution:\n{cr_data['cohort'].value_counts()}")
+```
+
+The `cohort` variable encodes which CR comparison each pseudo-observation
+belongs to:
+
+- `"all"`: P(Y = 0 | Y ≥ 0) — always observed
+- `"y>=mild"`: P(Y = mild | Y ≥ mild) — observed when y ≥ mild
+- `"y>=moderate"`: P(Y = moderate | Y ≥ moderate) — observed when y ≥ moderate
+
+### Basic Continuation Ratio Model
+
+We fit a random-intercepts CR model with fixed effects `cohort`, `sex`, and
+`time`.  The `cohort` factor captures the category-specific thresholds
+$\alpha_k$:
+
+```{python}
+fm = MixedModel(
+    fixed  = "y_new ~ cohort + sex + time",
+    random = "~ 1 | id",
+    data   = cr_data,
+    family = Binomial(),
+).fit(verbose=False)
+
+print(fm.summary())
+```
+
+The coefficients have a **log odds ratio** interpretation for a unit change in
+the covariate, conditioning on the CR event.  For example,
+`exp(coef["sex[T.male]"])` is the odds ratio for males versus females for
+any category $k$, given $Y \geq k$ (forward formulation).
+
+### Relaxing the CR Assumption
+
+The CR model assumes the same covariate effects across all categories.  We
+can test this for `sex` by fitting an interaction model:
+
+```{python}
+gm = MixedModel(
+    fixed  = "y_new ~ cohort * sex + time",
+    random = "~ 1 | id",
+    data   = cr_data,
+    family = Binomial(),
+).fit(verbose=False)
+
+print(gm.summary())
+```
+
+#### Likelihood Ratio Test
+
+```{python}
+lrt = MixModResults.anova(fm, gm)
+print(lrt.to_string())
+```
+
+A non-significant p-value suggests that `sex` satisfies the CR ordinality
+assumption, i.e., its effect does not vary by category.
+
+### Effect Plots — Conditional CR Probabilities
+
+We first visualise the **conditional** CR probabilities: for each cohort, the
+probability of "stopping" at that category given that the subject has reached
+it.
+
+```{python}
+# Prediction grid: all cohort levels × sex × time 0–10
+time_grid = np.linspace(0, 10, 55)
+cohort_levels = list(cr_data["cohort"].cat.categories)
+
+grid_rows = []
+for c in cohort_levels:
+    for s in ["male", "female"]:
+        for t in time_grid:
+            grid_rows.append({"cohort": c, "sex": s, "time": t, "id": 0})
+
+nDF = pd.DataFrame(grid_rows)
+nDF["cohort"] = pd.Categorical(nDF["cohort"], categories=cohort_levels)
+
+# Predicted conditional CR probabilities (mean-subject, b=0)
+nDF["pred"] = fm.predict(newdata=nDF, type_pred="mean_subject")
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 5), sharey=True)
+colors = {"none": "#1f77b4", "y>=mild": "#ff7f0e", "y>=moderate": "#2ca02c"}
+colors = {c: col for c, col in zip(cohort_levels, ["#1f77b4", "#ff7f0e", "#2ca02c"])}
+
+for ax, sex_val in zip(axes, ["male", "female"]):
+    sub = nDF[nDF["sex"] == sex_val]
+    for cohort_val, grp in sub.groupby("cohort", observed=True):
+        ax.plot(grp["time"], grp["pred"], label=cohort_val,
+                color=colors.get(cohort_val, "grey"), linewidth=2)
+    ax.set_title(f"Sex: {sex_val}")
+    ax.set_xlabel("Follow-up time")
+    ax.set_ylim(0, 1)
+
+axes[0].set_ylabel("Conditional CR probability")
+axes[0].legend(title="Cohort")
+fig.suptitle("Conditional Continuation Ratio Probabilities", fontsize=13)
+plt.tight_layout()
+plt.show()
+```
+
+### Effect Plots — Marginal Category Probabilities
+
+Conditional CR probabilities are not directly interpretable as
+$\Pr(Y = k)$.  We convert them to **marginal category probabilities** using
+`cr_marg_probs()`.
+
+To do this we need the full linear predictor matrix $\eta$ (one column per
+cohort) for each grid point.  We extract the fitted coefficients and build
+$\eta$ manually:
+
+```{python}
+coefs = fm.fixef()
+print(coefs)
+```
+
+```{python}
+# Extract threshold and covariate effects from the fitted coefficients
+# Model formula: y_new ~ cohort + sex + time
+# Dummy coding: cohort reference = "all"
+intercept       = coefs["Intercept"]
+d_cohort_mild   = coefs.get("cohort[T.y>=mild]",     0.0)
+d_cohort_mod    = coefs.get("cohort[T.y>=moderate]", 0.0)
+beta_sex_male   = coefs.get("sex[T.male]",           0.0)
+beta_time       = coefs["time"]
+
+# Threshold linear predictors for each cohort (at b_i = 0)
+alpha_all  = intercept
+alpha_mild = intercept + d_cohort_mild
+alpha_mod  = intercept + d_cohort_mod
+
+# Grid: sex × time only (cohort is handled inside cr_marg_probs)
+marg_rows = []
+for s in ["male", "female"]:
+    for t in time_grid:
+        sex_val = 1.0 if s == "male" else 0.0
+        eta_cov = beta_sex_male * sex_val + beta_time * t
+        eta_vec = np.array([
+            alpha_all  + eta_cov,
+            alpha_mild + eta_cov,
+            alpha_mod  + eta_cov,
+        ])
+        marg_rows.append({"sex": s, "time": t, "eta": eta_vec})
+
+marg_df = pd.DataFrame(marg_rows)
+eta_matrix_pred = np.stack(marg_df["eta"].values)          # (n_grid, 3)
+mprobs_pred     = cr_marg_probs(eta_matrix_pred, direction="forward")  # (n_grid, 4)
+
+# Attach predicted probabilities to the grid
+for k, lbl in enumerate(cat_labels):
+    marg_df[lbl] = mprobs_pred[:, k]
+```
+
+```{python}
+fig, axes = plt.subplots(1, 2, figsize=(11, 5), sharey=True)
+cat_colors = {"none": "#1f77b4", "mild": "#ff7f0e",
+              "moderate": "#2ca02c", "severe": "#d62728"}
+
+for ax, sex_val in zip(axes, ["male", "female"]):
+    sub = marg_df[marg_df["sex"] == sex_val]
+    for lbl in cat_labels:
+        ax.plot(sub["time"], sub[lbl], label=lbl,
+                color=cat_colors[lbl], linewidth=2)
+    ax.set_title(f"Sex: {sex_val}")
+    ax.set_xlabel("Follow-up time")
+    ax.set_ylim(0, 1)
+
+axes[0].set_ylabel("Marginal probability P(Y = k)")
+axes[0].legend(title="Category")
+fig.suptitle("Marginal Category Probabilities (b = 0)", fontsize=13)
+plt.tight_layout()
+plt.show()
+```
+
+---
+
+## Notes and Limitations
+
+| Feature | R (`GLMMadaptive`) | Python (`glmmadaptive`) |
+|---------|-------------------|------------------------|
+| `cr_setup()` — forward & backward | ✅ | ✅ |
+| `cr_marg_probs()` — forward & backward | ✅ | ✅ |
+| Standard binomial GLMM fitting | ✅ | ✅ |
+| LRT (`anova`) | ✅ | ✅ |
+| Effect plot — conditional CR probabilities | ✅ `effectPlotData()` + lattice | ✅ `predict()` + matplotlib |
+| Effect plot — marginal probs (conditional on RE) | ✅ `effectPlotData(CR_cohort_varname=...)` | ✅ manual `cr_marg_probs()` |
+| Effect plot — marginal probs (also over RE) | ✅ `effectPlotData(..., marginal=TRUE)` | ❌ not yet implemented |
+| Confidence bands on effect plots | ✅ (delta method in `effectPlotData`) | ❌ not yet implemented |
+
+The main limitation of the current Python port is that **marginalisation over
+random effects** for the CR probability plots is not yet implemented.  The
+conditional predictions (at $b_i = 0$) shown above correspond to the
+`marginal = FALSE` default in R.
+
+If you need marginal predictions that integrate out random effects, you can
+apply Monte-Carlo integration: simulate $b^{(s)} \sim \mathcal{N}(0, \hat{D})$
+for $s = 1, \ldots, S$, compute `cr_marg_probs()` for each draw, and average.
