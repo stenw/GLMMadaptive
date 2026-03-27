@@ -332,11 +332,12 @@ class MixModResults:
 
     @property
     def df_model(self) -> int:
-        """Number of free parameters (fixed effects + D params + phis)."""
+        """Number of free parameters (fixed effects + D params + phis + ZI gammas)."""
         q = self.D.shape[0]
         n_D = q if self.model.control["diagonal_D"] else q * (q + 1) // 2
         n_phis = len(self.phis) if self.phis is not None else 0
-        return len(self.params) + n_D + n_phis
+        n_gammas = len(self.gammas) if self.gammas is not None else 0
+        return len(self.params) + n_D + n_phis + n_gammas
 
     @property
     def aic(self) -> float:
