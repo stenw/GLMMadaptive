@@ -53,16 +53,17 @@ def _build_design_matrices(
     re_rhs: str,
     id_name: str,
     data: pd.DataFrame,
-) -> tuple[NDArray, NDArray, NDArray, NDArray, NDArray]:
-    """Construct y, X, Z, groups, group_labels."""
+) -> tuple[NDArray, NDArray, "patsy.DesignInfo", NDArray, NDArray, NDArray]:  # noqa: F821
+    """Construct y, X, X_design_info, Z, groups, group_labels."""
     import patsy
-    y, X = patsy.dmatrices(fixed_formula, data, return_type="matrix")
-    y = np.asarray(y).ravel()
-    X = np.asarray(X)
+    y_mat, X_mat = patsy.dmatrices(fixed_formula, data, return_type="matrix")
+    X_design_info = X_mat.design_info          # preserve before ndarray conversion
+    y = np.asarray(y_mat).ravel()
+    X = np.asarray(X_mat)
     Z = np.asarray(patsy.dmatrix(f"~ {re_rhs}", data, return_type="matrix"))
     groups_raw = data[id_name].values
     group_labels, groups = np.unique(groups_raw, return_inverse=True)
-    return y, X, Z, groups, group_labels
+    return y, X, X_design_info, Z, groups, group_labels
 
 
 def _build_zi_design_matrix(zi_formula: str, data: pd.DataFrame) -> NDArray:
@@ -201,7 +202,7 @@ class MixedModel:
 
         # Build count-part design matrices
         (
-            self._y, self._X, self._Z,
+            self._y, self._X, self._X_design_info, self._Z,
             self._groups, self._group_labels,
         ) = _build_design_matrices(fixed, re_rhs, id_name, data)
 

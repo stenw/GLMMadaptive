@@ -194,6 +194,50 @@ class TestPredictNewdata:
         assert_allclose(actual, expected, atol=1e-12)
 
 
+@pytest.mark.regression
+class TestPredictNewdataNoResponseColumn:
+    """
+    Population-level predictions must not require the response column in newdata.
+    Regression test for: predict(newdata, type_="mean_subject") raising PatsyError
+    when y is absent from newdata.
+    """
+
+    @pytest.fixture(scope="class")
+    def result(self, sim_binary_data):
+        return _fit_binary(sim_binary_data)
+
+    @pytest.fixture(scope="class")
+    def newdata_with_y(self, sim_binary_data):
+        sub = sim_binary_data[sim_binary_data["id"] < 5].copy()
+        return sub[sub["time"] < 2].reset_index(drop=True)
+
+    @pytest.fixture(scope="class")
+    def newdata_no_y(self, sim_binary_data):
+        """Same rows as newdata_with_y but without the response column."""
+        sub = sim_binary_data[sim_binary_data["id"] < 5].copy()
+        sub = sub[sub["time"] < 2].reset_index(drop=True)
+        return sub.drop(columns=["y"])
+
+    def test_mean_subject_works_without_y(self, result, newdata_no_y):
+        preds = result.predict(newdata=newdata_no_y, type_="mean_subject")
+        assert preds.shape == (len(newdata_no_y),)
+
+    def test_marginal_works_without_y(self, result, newdata_no_y):
+        preds = result.predict(newdata=newdata_no_y, type_="marginal")
+        assert preds.shape == (len(newdata_no_y),)
+
+    def test_mean_subject_same_with_and_without_y(self, result, newdata_with_y, newdata_no_y):
+        """Predictions must be identical regardless of whether y is present."""
+        preds_with    = result.predict(newdata=newdata_with_y, type_="mean_subject")
+        preds_without = result.predict(newdata=newdata_no_y,   type_="mean_subject")
+        assert_allclose(preds_with, preds_without, atol=1e-12)
+
+    def test_marginal_same_with_and_without_y(self, result, newdata_with_y, newdata_no_y):
+        preds_with    = result.predict(newdata=newdata_with_y, type_="marginal")
+        preds_without = result.predict(newdata=newdata_no_y,   type_="marginal")
+        assert_allclose(preds_with, preds_without, atol=1e-12)
+
+
 # ---------------------------------------------------------------------------
 # R comparison tests (require pre-saved fixtures)
 # ---------------------------------------------------------------------------

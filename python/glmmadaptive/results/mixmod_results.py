@@ -381,10 +381,11 @@ class MixModResults:
                 X = self.model._X
             else:
                 import patsy
-                _, X = patsy.dmatrices(
-                    self.model.fixed_formula, newdata, return_type="matrix"
+                X = np.asarray(
+                    patsy.build_design_matrices(
+                        [self.model._X_design_info], newdata, return_type="matrix"
+                    )[0]
                 )
-                X = np.asarray(X)
             eta = X @ betas_marg
             return self.family.linkinv(eta)
 
@@ -393,10 +394,11 @@ class MixModResults:
             groups = self.model._groups
         else:
             import patsy
-            _, X = patsy.dmatrices(
-                self.model.fixed_formula, newdata, return_type="matrix"
+            X = np.asarray(
+                patsy.build_design_matrices(
+                    [self.model._X_design_info], newdata, return_type="matrix"
+                )[0]
             )
-            X = np.asarray(X)
             groups_raw = newdata[self.model.id_name].values
             _, groups = np.unique(groups_raw, return_inverse=True)
 
