@@ -681,8 +681,14 @@ class MixModResults:
         return self.predict(type_=type_, **kwargs)
 
     def residuals(self, type_: str = "mean_subject") -> NDArray:
-        """Raw residuals: y - ŷ."""
-        return self.model._y - self.fitted(type_=type_)
+        """Raw residuals: y - ŷ (proportion residuals for grouped binomial)."""
+        y = self.model._y
+        if y.ndim == 2:
+            N = y[:, 0] + y[:, 1]
+            y_prop = y[:, 0] / np.maximum(N, 1)
+        else:
+            y_prop = y
+        return y_prop - self.fitted(type_=type_)
 
     # ------------------------------------------------------------------
     # simulate  (mirrors simulate.MixMod in R)

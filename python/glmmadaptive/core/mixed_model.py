@@ -56,10 +56,23 @@ def _build_design_matrices(
 ) -> tuple[NDArray, NDArray, "patsy.DesignInfo", NDArray, NDArray, NDArray]:  # noqa: F821
     """Construct y, X, X_design_info, Z, groups, group_labels."""
     import patsy
-    y_mat, X_mat = patsy.dmatrices(fixed_formula, data, return_type="matrix")
-    X_design_info = X_mat.design_info          # preserve before ndarray conversion
-    y = np.asarray(y_mat).ravel()
-    X = np.asarray(X_mat)
+    import re as _re
+    cbind_match = _re.match(
+        r'\s*cbind\(\s*(\w+)\s*,\s*(\w+)\s*\)\s*~\s*(.*)', fixed_formula
+    )
+    if cbind_match:
+        col1, col2, rhs = (
+            cbind_match.group(1), cbind_match.group(2), cbind_match.group(3)
+        )
+        y = np.column_stack([data[col1].values, data[col2].values]).astype(float)
+        X_mat = patsy.dmatrix(rhs, data, return_type="matrix")
+        X_design_info = X_mat.design_info
+        X = np.asarray(X_mat)
+    else:
+        y_mat, X_mat = patsy.dmatrices(fixed_formula, data, return_type="matrix")
+        X_design_info = X_mat.design_info          # preserve before ndarray conversion
+        y = np.asarray(y_mat).ravel()
+        X = np.asarray(X_mat)
     Z = np.asarray(patsy.dmatrix(f"~ {re_rhs}", data, return_type="matrix"))
     groups_raw = data[id_name].values
     group_labels, groups = np.unique(groups_raw, return_inverse=True)
@@ -102,10 +115,16 @@ def _split_zi_by_group(X_zi, Z_zi, groups, n_groups):
 def _initial_betas(y: NDArray, X: NDArray, family: BaseFamily) -> NDArray:
     try:
         sm_family = _to_statsmodels_family(family)
-        glm_mod = sm.GLM(y, X, family=sm_family).fit(disp=False)
+        if y.ndim == 2:
+            N = y[:, 0] + y[:, 1]
+            prop = y[:, 0] / np.maximum(N, 1)
+            glm_mod = sm.GLM(prop, X, family=sm_family, var_weights=N).fit(disp=False)
+        else:
+            glm_mod = sm.GLM(y, X, family=sm_family).fit(disp=False)
         return np.asarray(glm_mod.params * np.sqrt(1.346))
     except Exception:
-        betas, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+        y_flat = y[:, 0] / np.maximum(y[:, 0] + y[:, 1], 1) if y.ndim == 2 else y
+        betas, _, _, _ = np.linalg.lstsq(X, y_flat, rcond=None)
         return np.asarray(betas)
 
 
@@ -132,7 +151,7 @@ def _initial_phis(family: BaseFamily) -> Optional[NDArray]:
 def _initial_gammas(y: NDArray, X_zi: NDArray) -> NDArray:
     """Initialise ZI fixed effects from logistic regression of I(y==0) ~ X_zi."""
     try:
-        y_zi = (y == 0).astype(float)
+        y_zi = (y[:, 0] == 0 if y.ndim == 2 else y == 0).astype(float)
         glm_mod = sm.Logit(y_zi, X_zi).fit(disp=False, method="bfgs", maxiter=100)
         return np.asarray(glm_mod.params)
     except Exception:

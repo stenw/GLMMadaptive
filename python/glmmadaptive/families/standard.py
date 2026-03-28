@@ -114,6 +114,12 @@ class Binomial(BaseFamily):
         """
         mu = self.linkinv(eta)
         mu = np.clip(mu, 1e-15, 1.0 - 1e-15)
+        if np.ndim(y) == 2:
+            # Grouped binomial: y = [successes, failures]
+            k = y[:, 0]
+            N = y[:, 0] + y[:, 1]
+            return (gammaln(N + 1) - gammaln(k + 1) - gammaln(N - k + 1)
+                    + k * np.log(mu) + (N - k) * np.log(1.0 - mu))
         # Standard binary log-likelihood
         return y * np.log(mu) + (1.0 - y) * np.log(1.0 - mu)
 
@@ -140,6 +146,13 @@ class Binomial(BaseFamily):
     ) -> NDArray:
         mu = self.linkinv(eta)
         mu = np.clip(mu, 1e-15, 1.0 - 1e-15)
+        if np.ndim(y) == 2:
+            k = y[:, 0]
+            N = y[:, 0] + y[:, 1]
+            if self.link == "logit":
+                return k - N * mu          # canonical: ∂logL/∂η = k − N·μ
+            dmu_deta = self.mu_eta(eta)
+            return (k - N * mu) / (N * self.variance(mu)) * dmu_deta
         # Canonical logit: score = y - mu; chain rule for others
         if self.link == "logit":
             return y - mu
