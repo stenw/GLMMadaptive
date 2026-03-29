@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from glmmadaptive.utils.linalg import nearPD, cov_to_chol, chol_to_cov, log_dmvnorm, dmvnorm
+from glmmadaptive.utils.linalg import nearPD, cov_to_chol, chol_to_cov, log_dmvnorm, dmvnorm, dmvt_log, dmvt_log_grad
 
 
 class TestNearPD:
@@ -126,3 +126,95 @@ class TestLogDmvnorm:
         x = np.array([0.1, -0.2])
         val = log_dmvnorm(x, cov=cov)
         assert np.isscalar(val)
+
+
+class TestDmvtLog:
+    """Tests for dmvt_log() and dmvt_log_grad() — Student's-t penalty functions."""
+
+    def _default_args(self, p=3):
+        """Standard hyperparameters: mu=0, sigma=1 (inv_sigma_diag=1), df=3."""
+        mu = np.zeros(p)
+        inv_sigma_diag = np.ones(p)
+        df = 3.0
+        return mu, inv_sigma_diag, df
+
+    def test_maximum_at_mode(self):
+        """dmvt_log(mu, mu, ...) == 0 (log-density is maximised at the mode)."""
+        p = 4
+        mu, isd, df = self._default_args(p)
+        val = dmvt_log(mu, mu, isd, df)
+        assert_allclose(val, 0.0, atol=1e-12)
+
+    def test_decreasing_away_from_mode(self):
+        """Log-density decreases as we move away from mu."""
+        mu, isd, df = self._default_args(p=2)
+        v0 = dmvt_log(np.array([0.0, 0.0]), mu, isd, df)
+        v1 = dmvt_log(np.array([1.0, 0.0]), mu, isd, df)
+        v2 = dmvt_log(np.array([2.0, 0.0]), mu, isd, df)
+        assert v0 > v1 > v2
+
+    def test_approaches_normal_as_df_increases(self):
+        """For large df, dmvt_log should approach the normal log-density (up to constant)."""
+        from scipy.stats import multivariate_normal
+        p = 3
+        x = np.array([0.5, -0.3, 1.2])
+        mu = np.zeros(p)
+        isd = np.ones(p)
+        df = 1e6  # very large df → Normal
+
+        t_val = dmvt_log(x, mu, isd, df)
+        n_val = multivariate_normal.logpdf(x, mean=mu, cov=np.eye(p))
+        # dmvt_log is proportional; difference should be (roughly) the normalising constant
+        # What matters is that the *shape* matches: both should decrease by same amount for a shift
+        x2 = x + 0.1
+        t_diff = dmvt_log(x2, mu, isd, df) - t_val
+        n_diff = multivariate_normal.logpdf(x2, mean=mu, cov=np.eye(p)) - n_val
+        assert_allclose(t_diff, n_diff, atol=1e-4)
+
+    def test_scale_effect(self):
+        """Larger pen_sigma (smaller inv_sigma_diag) → weaker penalty (higher density away from mu)."""
+        x = np.array([1.0, 1.0])
+        mu = np.zeros(2)
+        df = 5.0
+        # tight penalty: sigma=0.5 → inv_sigma = 4
+        val_tight = dmvt_log(x, mu, np.full(2, 4.0), df)
+        # loose penalty: sigma=2 → inv_sigma = 0.25
+        val_loose = dmvt_log(x, mu, np.full(2, 0.25), df)
+        assert val_loose > val_tight
+
+    def test_returns_float(self):
+        mu, isd, df = self._default_args()
+        val = dmvt_log(np.ones(3), mu, isd, df)
+        assert isinstance(val, float)
+
+    def test_gradient_against_numerical(self):
+        """dmvt_log_grad should match a numerical gradient."""
+        from glmmadaptive.utils.numdiff import cd_grad
+        p = 4
+        rng = np.random.default_rng(42)
+        x = rng.normal(size=p)
+        mu = rng.normal(size=p) * 0.5
+        isd = np.exp(rng.normal(size=p))   # positive
+        df = 4.0
+
+        analytic = dmvt_log_grad(x, mu, isd, df)
+        numeric = cd_grad(lambda xx: dmvt_log(xx, mu, isd, df), x)
+        assert_allclose(analytic, numeric, rtol=1e-5, atol=1e-7)
+
+    def test_gradient_zero_at_mode(self):
+        """Gradient at x=mu should be zero."""
+        p = 3
+        mu = np.array([1.0, -0.5, 2.0])
+        isd = np.array([1.0, 2.0, 0.5])
+        df = 5.0
+        grad = dmvt_log_grad(mu, mu, isd, df)
+        assert_allclose(grad, np.zeros(p), atol=1e-12)
+
+    def test_gradient_points_toward_mode(self):
+        """Gradient at x > mu should be negative (points toward lower x, i.e. toward mu=0)."""
+        mu = np.zeros(2)
+        isd = np.ones(2)
+        df = 3.0
+        x = np.array([1.0, 1.0])   # both components above mu
+        grad = dmvt_log_grad(x, mu, isd, df)
+        assert np.all(grad < 0)

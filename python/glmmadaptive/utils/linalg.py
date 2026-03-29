@@ -211,3 +211,84 @@ def dmvnorm(
 ) -> float | NDArray:
     """Multivariate normal density (not log)."""
     return np.exp(log_dmvnorm(x, mean=mean, cov=cov, **kwargs))
+
+
+# ---------------------------------------------------------------------------
+# Multivariate Student's-t log-density  (port of dmvt() in R/Functions.R)
+# Used for the Student's-t penalty on fixed effects (betas).
+# ---------------------------------------------------------------------------
+
+def dmvt_log(
+    x: NDArray,
+    mu: NDArray,
+    inv_sigma_diag: NDArray,
+    df: float,
+) -> float:
+    """Proportional log-density of the multivariate Student's-t distribution.
+
+    Mirrors the ``dmvt()`` function in ``R/Functions.R`` (proportional form,
+    diagonal scale matrix).  Used as the penalty log-prior on fixed effects.
+
+    The density is proportional to::
+
+        log p(β) ∝ -(df + p) / 2 * log(1 + (β - μ)' Σ⁻¹ (β - μ) / df)
+
+    where Σ⁻¹ = diag(inv_sigma_diag).
+
+    Parameters
+    ----------
+    x : (p,) array
+        Evaluation point (typically the current betas vector).
+    mu : (p,) array
+        Location vector (pen_mu broadcast to length p).
+    inv_sigma_diag : (p,) array
+        Diagonal of the inverse scale matrix (= 1 / pen_sigma²).
+    df : float
+        Degrees of freedom.
+
+    Returns
+    -------
+    float
+        Proportional log-density value.
+    """
+    p = len(x)
+    diff = x - mu
+    quad = np.dot(diff ** 2, inv_sigma_diag)   # (x-μ)' diag(Σ⁻¹) (x-μ)
+    return -0.5 * (df + p) * np.log1p(quad / df)
+
+
+def dmvt_log_grad(
+    x: NDArray,
+    mu: NDArray,
+    inv_sigma_diag: NDArray,
+    df: float,
+) -> NDArray:
+    """Gradient of :func:`dmvt_log` with respect to *x*.
+
+    Used to add the penalty score to the beta gradient during fitting.
+
+    The gradient is::
+
+        ∂log p(β)/∂β = -(df + p) * Σ⁻¹ (β - μ) / (df + (β - μ)' Σ⁻¹ (β - μ))
+
+    Parameters
+    ----------
+    x : (p,) array
+        Evaluation point.
+    mu : (p,) array
+        Location vector.
+    inv_sigma_diag : (p,) array
+        Diagonal of Σ⁻¹.
+    df : float
+        Degrees of freedom.
+
+    Returns
+    -------
+    (p,) array
+        Gradient of the log-density w.r.t. x.
+    """
+    p = len(x)
+    diff = x - mu
+    quad = np.dot(diff ** 2, inv_sigma_diag)
+    factor = (df + p) / (df + quad)
+    return -factor * inv_sigma_diag * diff

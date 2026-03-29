@@ -195,6 +195,7 @@ class MixedModel:
         family: BaseFamily | None = None,
         zi_fixed: str | None = None,
         zi_random: str | None = None,
+        penalized: bool | dict = False,
         initial_values: dict | None = None,
         control: dict | None = None,
     ):
@@ -212,6 +213,24 @@ class MixedModel:
         self.zi_random = zi_random
         self.initial_values = initial_values or {}
         self.control = {**DEFAULT_CONTROL, **(control or {})}
+
+        # -- Parse penalized (mirrors R's mixed_model() argument handling) ----
+        if isinstance(penalized, bool) and not penalized:
+            self._penalized = {"penalized": False}
+        elif isinstance(penalized, bool) and penalized:
+            self._penalized = {"penalized": True, "pen_mu": 0.0, "pen_sigma": 1.0, "pen_df": 3.0}
+        elif isinstance(penalized, dict):
+            allowed = {"pen_mu", "pen_sigma", "pen_df"}
+            bad = set(penalized) - allowed
+            if bad:
+                raise ValueError(
+                    f"Unknown 'penalized' keys: {bad}. "
+                    f"Expected a subset of {allowed}."
+                )
+            self._penalized = {"penalized": True, "pen_mu": 0.0, "pen_sigma": 1.0, "pen_df": 3.0}
+            self._penalized.update(penalized)
+        else:
+            raise TypeError("'penalized' must be bool or dict")
 
         # Parse random formula
         re_rhs, id_name, diagonal_D = _parse_random_formula(random, data)
@@ -314,6 +333,7 @@ class MixedModel:
             X_zi_list=self._X_zi_list,
             Z_zi_list=self._Z_zi_list,
             gammas_init=gammas0,
+            penalized=self._penalized,
         )
 
         return MixModResults(model=self, fit_result=fit_result)

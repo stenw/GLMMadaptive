@@ -30,7 +30,7 @@ from numpy.typing import NDArray
 from scipy.optimize import minimize
 
 from glmmadaptive.families.base import BaseFamily
-from glmmadaptive.utils.linalg import nearPD, cov_to_chol, chol_to_cov, log_dmvnorm
+from glmmadaptive.utils.linalg import nearPD, cov_to_chol, chol_to_cov, log_dmvnorm, dmvt_log
 from glmmadaptive.utils.quadrature import gh_adaptive, find_posterior_mode
 from glmmadaptive.utils.numdiff import cd_hess, cd_grad, fd_hess
 from glmmadaptive.core.fit_funs import (
@@ -129,20 +129,23 @@ def _update_betas(
     betas, D, phis, family, X_list, Z_list, y_list, gh,
     max_coef: float,
     X_zi_list=None, Z_zi_list=None, gammas=None,
+    pen_active: bool = False,
+    pen_mu: Optional[NDArray] = None,
+    pen_inv_sigma_diag: Optional[NDArray] = None,
+    pen_df: Optional[float] = None,
 ) -> NDArray:
-    """One Newton-Raphson step for betas."""
+    """One Newton-Raphson step for betas (penalty-aware)."""
 
     def neg_ll(bb):
         return -loglik_mixed(
             bb, D, phis, family, X_list, Z_list, y_list, gh,
             X_zi_list=X_zi_list, Z_zi_list=Z_zi_list, gammas=gammas,
+            penalized=pen_active,
+            pen_mu=pen_mu, pen_inv_sigma_diag=pen_inv_sigma_diag, pen_df=pen_df,
         )
 
     H = nearPD(fd_hess(neg_ll, betas))
-    grad = -score_betas(
-        betas, D, phis, family, X_list, Z_list, y_list, gh,
-        X_zi_list=X_zi_list, Z_zi_list=Z_zi_list, gammas=gammas,
-    )
+    grad = cd_grad(neg_ll, betas)
     try:
         delta = np.linalg.solve(H, grad)
     except np.linalg.LinAlgError:
@@ -215,6 +218,7 @@ def mixed_fit(
     X_zi_list: Optional[list[NDArray]] = None,
     Z_zi_list: Optional[list[Optional[NDArray]]] = None,
     gammas_init: Optional[NDArray] = None,
+    penalized: Optional[dict] = None,
 ) -> dict:
     """
     Fit a GLMM via the hybrid EM + quasi-Newton algorithm.
@@ -256,6 +260,15 @@ def mixed_fit(
     n_iter = 0
     ll_prev = -np.inf
 
+    # -- Penalty setup (mirrors R/mixed_fit.R lines 115-120) ----------------
+    pen_active = (penalized is not None and penalized.get("penalized", False))
+    if pen_active:
+        pen_mu = np.full(len(betas), penalized["pen_mu"])
+        pen_inv_sigma_diag = np.full(len(betas), 1.0 / penalized["pen_sigma"] ** 2)
+        pen_df = float(penalized["pen_df"])
+    else:
+        pen_mu = pen_inv_sigma_diag = pen_df = None
+
     # ------------------------------------------------------------------
     # Phase 1: EM
     # ------------------------------------------------------------------
@@ -284,6 +297,8 @@ def mixed_fit(
             betas, D, phis, family, X_list, Z_list, y_list, gh,
             max_coef=ctrl["max_coef"],
             X_zi_list=X_zi_list, Z_zi_list=Z_zi_list, gammas=gammas,
+            pen_active=pen_active, pen_mu=pen_mu,
+            pen_inv_sigma_diag=pen_inv_sigma_diag, pen_df=pen_df,
         )
 
         # M-step: phis
@@ -302,10 +317,12 @@ def mixed_fit(
                 X_zi_list=X_zi_list, Z_zi_list=Z_zi_list,
             )
 
-        # Log-likelihood
+        # Log-likelihood (includes penalty when active)
         ll = loglik_mixed(
             betas_new, D, phis_new, family, X_list, Z_list, y_list, gh,
             X_zi_list=X_zi_list, Z_zi_list=Z_zi_list, gammas=gammas_new,
+            penalized=pen_active, pen_mu=pen_mu,
+            pen_inv_sigma_diag=pen_inv_sigma_diag, pen_df=pen_df,
         )
 
         # Convergence check
@@ -314,7 +331,7 @@ def mixed_fit(
             delta_params = max(delta_params, np.max(np.abs(phis_new - phis)))
         if has_zi and gammas is not None and gammas_new is not None:
             delta_params = max(delta_params, np.max(np.abs(gammas_new - gammas)))
-        delta_ll = abs(ll - ll_prev) / (abs(ll_prev) + 1.0 + ctrl["tol3"])
+        delta_ll = abs(ll - ll_prev) / (abs(ll_prev) + 1.0 + ctrl["tol3"]) if np.isfinite(ll_prev) else np.inf
 
         if verbose:
             print(f"EM iter {em_iter+1}: logLik={ll:.6f}  Δparam={delta_params:.2e}")
@@ -346,6 +363,8 @@ def mixed_fit(
                 return loglik_mixed(
                     b, D_, p_, family, X_list, Z_list, y_list, gh,
                     X_zi_list=X_zi_list, Z_zi_list=Z_zi_list, gammas=g_,
+                    penalized=pen_active, pen_mu=pen_mu,
+                    pen_inv_sigma_diag=pen_inv_sigma_diag, pen_df=pen_df,
                     sign=-1.0,
                 )
             except Exception:
@@ -374,7 +393,7 @@ def mixed_fit(
             D = nearPD(D)
 
             ll = -result.fun
-            delta_ll = abs(ll - ll_prev) / (abs(ll_prev) + 1.0 + ctrl["tol3"])
+            delta_ll = abs(ll - ll_prev) / (abs(ll_prev) + 1.0 + ctrl["tol3"]) if np.isfinite(ll_prev) else np.inf
             ll_prev = ll
             iter_qn += ctrl["iter_qn_incr"]
 
@@ -397,6 +416,8 @@ def mixed_fit(
     ll_final = loglik_mixed(
         betas, D, phis, family, X_list, Z_list, y_list, gh_final,
         X_zi_list=X_zi_list, Z_zi_list=Z_zi_list, gammas=gammas,
+        penalized=pen_active, pen_mu=pen_mu,
+        pen_inv_sigma_diag=pen_inv_sigma_diag, pen_df=pen_df,
     )
 
     n_phis = len(phis) if phis is not None else 0
@@ -411,6 +432,8 @@ def mixed_fit(
         return -loglik_mixed(
             b, D_, p_, family, X_list, Z_list, y_list, gh_final,
             X_zi_list=X_zi_list, Z_zi_list=Z_zi_list, gammas=g_,
+            penalized=pen_active, pen_mu=pen_mu,
+            pen_inv_sigma_diag=pen_inv_sigma_diag, pen_df=pen_df,
         )
 
     try:
@@ -448,4 +471,5 @@ def mixed_fit(
         "n_re": n_re,
         "n_phis": n_phis,
         "n_gammas": n_gammas_val,
+        "penalized": penalized or {"penalized": False},
     }

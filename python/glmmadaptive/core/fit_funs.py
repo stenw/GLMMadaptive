@@ -29,7 +29,7 @@ from scipy.special import logsumexp
 from scipy.linalg import solve
 
 from glmmadaptive.families.base import BaseFamily
-from glmmadaptive.utils.linalg import log_dmvnorm, nearPD, cov_to_chol, chol_to_cov
+from glmmadaptive.utils.linalg import log_dmvnorm, nearPD, cov_to_chol, chol_to_cov, dmvt_log, dmvt_log_grad
 from glmmadaptive.utils.numdiff import cd_grad
 
 
@@ -111,6 +111,10 @@ def loglik_mixed(
     X_zi_list: Optional[list[NDArray]] = None,
     Z_zi_list: Optional[list[Optional[NDArray]]] = None,
     gammas: Optional[NDArray] = None,
+    penalized: bool = False,
+    pen_mu: Optional[NDArray] = None,
+    pen_inv_sigma_diag: Optional[NDArray] = None,
+    pen_df: Optional[float] = None,
     sign: float = 1.0,
 ) -> float:
     """
@@ -122,6 +126,8 @@ def loglik_mixed(
     ----------
     betas, D, phis : parameters for the count part.
     X_zi_list, Z_zi_list, gammas : ZI parameters (optional).
+    penalized : if True, add the Student's-t penalty on betas.
+    pen_mu, pen_inv_sigma_diag, pen_df : penalty hyperparameters.
     sign : multiply result by sign (-1.0 for minimisers).
     """
     n_groups = len(X_list)
@@ -153,6 +159,9 @@ def loglik_mixed(
 
         total_ll += logsumexp(log_integ)
 
+    if penalized:
+        total_ll += dmvt_log(betas, pen_mu, pen_inv_sigma_diag, pen_df)
+
     return sign * total_ll
 
 
@@ -170,6 +179,10 @@ def loglik_mixed_vec(
     n_gammas: int = 0,
     X_zi_list: Optional[list[NDArray]] = None,
     Z_zi_list: Optional[list[Optional[NDArray]]] = None,
+    penalized: bool = False,
+    pen_mu: Optional[NDArray] = None,
+    pen_inv_sigma_diag: Optional[NDArray] = None,
+    pen_df: Optional[float] = None,
 ) -> float:
     """Wrapper for optimisers that take a single parameter vector."""
     betas, D, phis, gammas = _unpack_params(
@@ -178,6 +191,8 @@ def loglik_mixed_vec(
     return loglik_mixed(
         betas, D, phis, family, X_list, Z_list, y_list, gh,
         X_zi_list=X_zi_list, Z_zi_list=Z_zi_list, gammas=gammas,
+        penalized=penalized,
+        pen_mu=pen_mu, pen_inv_sigma_diag=pen_inv_sigma_diag, pen_df=pen_df,
         sign=-1.0,
     )
 

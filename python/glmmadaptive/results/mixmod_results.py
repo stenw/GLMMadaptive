@@ -66,6 +66,9 @@ class MixModResults:
         # Per-group score contributions (for sandwich estimator)
         self._score_contributions = fit_result.get("score_contributions", None)
 
+        # Penalty settings
+        self.penalized = fit_result.get("penalized", {"penalized": False})
+
         # Extract parameter names from model design matrices
         self._beta_names = self._get_beta_names()
 
